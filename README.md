@@ -105,8 +105,8 @@ All configuration is via environment variables (or a `.env` file next to the pro
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `IMMICH_URL` | **Yes** | — | Immich base URL, e.g. `http://immich-server:2283`. Must start with `http://` or `https://`. |
-| `IMMICH_API_KEYS` | **Yes†** | — | One or more API keys, **comma-separated on a single line**. Rotated automatically. |
-| `IMMICH_API_KEY` | **Yes†** | — | Single-key fallback. Used only if `IMMICH_API_KEYS` is not set. |
+| `IMMICH_API_KEYS` | **Yes†** | — | Multiple Immich API keys, comma-separated on a single line. Each key is associated with a user account. The application processes assets for each account using its corresponding API key. |
+| `IMMICH_API_KEY` | **Yes†** | — | Single API key fallback for installations using one Immich account. Used only if `IMMICH_API_KEYS` is not set. |
 | `MEDIA_PATH` | **Yes** | — | Path to the Immich library **as mounted in this container**. Must exist and be readable/writable. |
 | `SYNC_INTERVAL` | No | `900` | Seconds between sync runs. `900` = 15 minutes. |
 | `LOG_LEVEL` | No | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL`. |
@@ -115,7 +115,7 @@ All configuration is via environment variables (or a `.env` file next to the pro
 | `EXIF_DRY_RUN` | No | `0` | If `1`, log intended writes and modify nothing. The sync-state file is also left unchanged, so a later real run will still process the assets. |
 | `EXIF_KEEP_BACKUPS` | No | `1` | If `1`, ExifTool saves `<file>_original` before editing. Set `0` only after you trust the tool. |
 
-† One of `IMMICH_API_KEYS` or `IMMICH_API_KEY` is required. If both are present, `IMMICH_API_KEYS` wins.
+† At least one of `IMMICH_API_KEYS` or `IMMICH_API_KEY` is required. `IMMICH_API_KEYS` supports multiple user accounts. If both are configured, `IMMICH_API_KEYS` takes precedence.
 
 Startup fails fast with a clear `ValueError` if any required variable is missing, if a key is still the placeholder `YOUR_API_KEY_HERE`, if `SYNC_INTERVAL` isn't a positive integer, or if `LOG_LEVEL` isn't a known level.
 
