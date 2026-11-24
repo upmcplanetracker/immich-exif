@@ -1,4 +1,4 @@
-This was forked from another repo and I vibe coded the crap out of it to get it working.  Will put in more details later.
+This was forked from another repo https://github.com/jmathai/immich-exif and I vibe coded the crap out of it to squash bugs, add .envs, and add multiple api support.  Will put in more details later.
 immich-exif
 ===========
 
