@@ -77,12 +77,23 @@ Minimum required:
 
 ### 3\. Build and run — safely
 
-    docker compose build
-    docker compose run --rm -e EXIF_DRY_RUN=1 immich-exif   # 1. dry run
-    docker compose logs -f immich-exif                       # 2. inspect commands
-    docker compose up -d                                     # 3. go live
+Set `EXIF_DRY_RUN=1` in `.env` before the first start. Then run:
 
-The dry run logs every ExifTool command it _would_ run without modifying any file. Do this first.
+    docker compose build
+    docker compose up -d
+    docker compose logs -f immich-exif
+
+This is a continuously running service, so use `up -d` for the dry run rather
+than `docker compose run --rm`. Review the `[DRY RUN]` commands in the logs.
+No media files or persistent sync state are changed while dry-run mode is on.
+
+When the log looks right, change `EXIF_DRY_RUN=0` in `.env` and recreate the
+service:
+
+    docker compose up -d --force-recreate
+
+The first real run may recheck the full library if the state file was created
+by an older version. Keep backups enabled for that run.
 
 Configuration
 -------------
@@ -167,7 +178,8 @@ no
 
 `0`
 
-If `1`, log intended writes and modify nothing.
+If `1`, log intended writes and modify nothing. The sync-state file is also
+left unchanged, so a later real run will still process the assets.
 
 `EXIF_KEEP_BACKUPS`
 
@@ -202,7 +214,11 @@ Safety features
 
 ### Dry run
 
-Set `EXIF_DRY_RUN=1` and every intended ExifTool command is logged at `INFO` with a `[DRY RUN]` prefix. No files are opened for writing.
+Set `EXIF_DRY_RUN=1` and every intended ExifTool command is logged at `INFO`
+with a `[DRY RUN]` prefix. Media files are not modified, asset metadata is not
+committed to the sync cache, the sync timestamp is not advanced, and the state
+file is not saved. You can inspect the dry-run output, turn dry-run off, and
+run again without losing the work that needs to be done.
 
 ### Backups
 
@@ -228,7 +244,19 @@ The old version of this tool removed **all** existing keywords before writing al
 
 ### State schema migration
 
-The state file has a `version` field. On upgrade from the old destructive version (schema v1 → v2), the tool clears its per-asset metadata cache and triggers a one-time full re-sync. This is intentional: it re-adds keywords to files that were previously wiped. Expect one long sync on first upgrade.
+The state file has a `version` field. Schema v3 clears the cached asset metadata
+and resets the last-sync timestamp when upgrading from v1 or v2. This is
+intentional: older dry-runs could have marked assets as synchronized without
+writing their files. The next real run therefore rechecks the full library.
+Expect one longer sync after this upgrade.
+
+The sync engine does not prune cached assets from an incremental search because
+that search is not a complete inventory of the library. It also does not
+advance the sync timestamp when a run is interrupted or any asset fails; those
+assets are retried on the next cycle.
+If Immich returns an error while reading any album, the album-map scan aborts
+the sync instead of continuing with incomplete data. This prevents a temporary
+API failure from being mistaken for albums being removed.
 
 Corrupt state files (bad JSON) are renamed to `sync_state.json.corrupt-<timestamp>` and logged at `ERROR`, rather than silently triggering a mystery full resync.
 
