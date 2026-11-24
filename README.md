@@ -1,4 +1,4 @@
-
+This was forked from another repo and I vibe coded the crap out of it to get it working.  Will put in more details later.
 immich-exif
 ===========
 
@@ -332,8 +332,3 @@ Running locally (without Docker)
     EXIF_DRY_RUN=1 python -m src.main
 
 Requires `src/__init__.py` to exist for the package import to work (it should already be in the repo).
-
-License
--------
-
-(Whatever the upstream repo uses — add a `LICENSE` file if missing.)
