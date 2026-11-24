@@ -6,22 +6,25 @@ Writes metadata from your [Immich](https://immich.app) library (albums, favorite
 
 **Why this exists:** Immich stores metadata in its database, not in the files. When you add a photo to an album in Immich, the `.jpg` on disk is unchanged — so external tools (Lightroom, digiKam, PhotoPrism, plain `exiftool`) don't see your albums, ratings, or descriptions. This service bridges that gap by reading from the Immich API and writing to the files via ExifTool.
 
-How it works
-------------
+## Data Sources
 
-Source
+### Immich API
+Used to retrieve metadata associated with assets, including:
 
-What it provides
+- Album memberships
+- Favorites
+- Descriptions (including AI-generated descriptions)
+- GPS coordinates
+- Capture dates
 
-Immich API
+The Immich API is used for **reading metadata only**. This project does not modify assets through the Immich API.
 
-albums, favorite, description, GPS, date
+### Filesystem (`MEDIA_PATH`)
+Provides direct access to the original media files, including `.jpg`, `.jpeg`, and `.mp4` files.
 
-Filesystem (`MEDIA_PATH`)
+ExifTool is used to write metadata directly into the media files themselves. This requires the container to have **read/write access** to the Immich library mounted at `MEDIA_PATH`.
 
-the actual `.jpg` / `.mp4` bytes to modify
-
-The Immich API is **read-only** for our purposes. There is no Immich endpoint that writes EXIF into files. The container must have read/write access to your Immich library volume at `MEDIA_PATH`.
+The API provides the metadata; the filesystem provides the actual files to modify.
 
 Features
 --------
@@ -95,99 +98,22 @@ service:
 The first real run may recheck the full library if the state file was created
 by an older version. Keep backups enabled for that run.
 
-Configuration
--------------
+## Configuration
 
 All configuration is via environment variables (or a `.env` file next to the process). Real environment variables always override `.env`.
 
-Variable
-
-Required
-
-Default
-
-Description
-
-`IMMICH_URL`
-
-**yes**
-
-—
-
-Immich base URL, e.g. `http://immich-server:2283`. Must start with `http://` or `https://`.
-
-`IMMICH_API_KEYS`
-
-**yes**†
-
-—
-
-One or more API keys, **comma-separated on a single line**. Rotated automatically.
-
-`IMMICH_API_KEY`
-
-**yes**†
-
-—
-
-Single-key fallback. Used only if `IMMICH_API_KEYS` is not set.
-
-`MEDIA_PATH`
-
-**yes**
-
-—
-
-Path to the Immich library **as mounted in this container**. Must exist and be readable/writable.
-
-`SYNC_INTERVAL`
-
-no
-
-`900`
-
-Seconds between sync runs. `900` = 15 min.
-
-`LOG_LEVEL`
-
-no
-
-`INFO`
-
-`DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL`.
-
-`LOG_FILE`
-
-no
-
-`/app/logs/exif-writer.log`
-
-Log file path.
-
-`STATE_FILE`
-
-no
-
-`/app/state/sync_state.json`
-
-Where sync state is persisted.
-
-`EXIF_DRY_RUN`
-
-no
-
-`0`
-
-If `1`, log intended writes and modify nothing. The sync-state file is also
-left unchanged, so a later real run will still process the assets.
-
-`EXIF_KEEP_BACKUPS`
-
-no
-
-`1`
-
-If `1`, ExifTool saves `<file>_original` before editing. Set `0` only after you trust the tool.
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `IMMICH_URL` | **Yes** | — | Immich base URL, e.g. `http://immich-server:2283`. Must start with `http://` or `https://`. |
+| `IMMICH_API_KEYS` | **Yes†** | — | One or more API keys, **comma-separated on a single line**. Rotated automatically. |
+| `IMMICH_API_KEY` | **Yes†** | — | Single-key fallback. Used only if `IMMICH_API_KEYS` is not set. |
+| `MEDIA_PATH` | **Yes** | — | Path to the Immich library **as mounted in this container**. Must exist and be readable/writable. |
+| `SYNC_INTERVAL` | No | `900` | Seconds between sync runs. `900` = 15 minutes. |
+| `LOG_LEVEL` | No | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL`. |
+| `LOG_FILE` | No | `/app/logs/exif-writer.log` | Log file path. |
+| `STATE_FILE` | No | `/app/state/sync_state.json` | Where sync state is persisted. |
+| `EXIF_DRY_RUN` | No | `0` | If `1`, log intended writes and modify nothing. The sync-state file is also left unchanged, so a later real run will still process the assets. |
+| `EXIF_KEEP_BACKUPS` | No | `1` | If `1`, ExifTool saves `<file>_original` before editing. Set `0` only after you trust the tool. |
 
 † One of `IMMICH_API_KEYS` or `IMMICH_API_KEY` is required. If both are present, `IMMICH_API_KEYS` wins.
 
