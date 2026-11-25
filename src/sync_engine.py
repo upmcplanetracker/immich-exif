@@ -3,6 +3,7 @@
 import logging
 import os
 import threading
+import time
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
@@ -18,6 +19,7 @@ logger = logging.getLogger(__name__)
 class ProcessResult(Enum):
     OK = "ok"
     SKIPPED = "skipped"
+    READ_ONLY_VIDEO = "read_only_video"
     ERROR = "error"
 
 
@@ -47,6 +49,7 @@ class SyncEngine:
         Dry-runs never change or save persistent sync state.
         """
         dry_run = self.exif_writer.dry_run
+        run_started = time.monotonic()
         sync_started_at = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace(
             "+00:00", "Z"
         )
@@ -82,7 +85,10 @@ class SyncEngine:
         )
 
         processed = 0
+        skipped_unchanged = 0
+        skipped_read_only = 0
         errors = 0
+        checked = 0
         interrupted = False
 
         for index, asset_id in enumerate(assets_to_process, start=1):
@@ -95,6 +101,7 @@ class SyncEngine:
                 )
                 break
 
+            checked += 1
             try:
                 result = self._process_asset(asset_id, asset_album_map)
             except Exception:
@@ -103,6 +110,10 @@ class SyncEngine:
 
             if result is ProcessResult.OK:
                 processed += 1
+            elif result is ProcessResult.SKIPPED:
+                skipped_unchanged += 1
+            elif result is ProcessResult.READ_ONLY_VIDEO:
+                skipped_read_only += 1
             elif result is ProcessResult.ERROR:
                 errors += 1
 
@@ -117,13 +128,29 @@ class SyncEngine:
         if stop_event is not None and stop_event.is_set():
             interrupted = True
 
+        duration = time.monotonic() - run_started
+        logger.info(
+            "SYNC RUN SUMMARY%s\n"
+            "Assets checked: %d/%d candidates\n"
+            "Processed successfully: %d\n"
+            "Skipped (unchanged): %d\n"
+            "Skipped (read-only video): %d\n"
+            "Errors: %d\n"
+            "Interrupted: %s\n"
+            "Duration: %.1f seconds",
+            " (DRY RUN)" if dry_run else "",
+            checked,
+            len(assets_to_process),
+            processed,
+            skipped_unchanged,
+            skipped_read_only,
+            errors,
+            "Yes" if interrupted else "No",
+            duration,
+        )
+
         if dry_run:
-            logger.info(
-                "DRY RUN complete: %d would be processed, %d errors. "
-                "Persistent state was not changed.",
-                processed,
-                errors,
-            )
+            logger.info("DRY RUN: Persistent state was not changed.")
             return processed, errors
 
         # Save successful per-asset work even if another asset failed. Do not
@@ -193,6 +220,16 @@ class SyncEngine:
                 file_path,
             )
             return ProcessResult.ERROR
+
+        # Some containers (MKV/WebM/AVI) are intentionally read-only for this
+        # ExifTool build. Mark them handled in state so unchanged assets are not
+        # reconsidered on every incremental run, but report them as skipped.
+        if self.exif_writer.is_read_only_video(file_path):
+            logger.info("Metadata write skipped (read-only video): %s", file_path)
+            if not self.exif_writer.dry_run:
+                self.state_manager.set_asset_metadata(asset_id, metadata)
+            return ProcessResult.READ_ONLY_VIDEO
+
 
         previous = self.state_manager.get_asset_metadata(asset_id)
         if not self.exif_writer.write_metadata(file_path, metadata, previous):

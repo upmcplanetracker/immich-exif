@@ -58,20 +58,23 @@ PHOTO_EXTENSIONS = {
     '.gpr',                        # GoPro RAW
 }
 
-# Videos: exiftool writes QuickTime/XMP atoms for the first group.
-# MKV/WEBM/AVI are read-only in exiftool but Immich stores them, so we
-# include them here and let is_supported_file() pass them through —
-# exiftool will simply make no changes and report "1 image files unchanged",
-# which _is_failure() correctly treats as a non-failure.
+# Video formats Immich may contain.
+# ExifTool can write metadata to the first group, but the installed ExifTool
+# does not list MKV, WEBM, or AVI as writable formats. Those are handled as
+# read-only assets and skipped by write_metadata() without invoking ExifTool.
+READ_ONLY_VIDEO_EXTENSIONS = {
+    '.mkv',
+    '.webm',
+    '.avi',
+}
+
 VIDEO_EXTENSIONS = {
     '.mp4',
     '.mov', '.qt',
     '.m4v', '.m4a',
     '.3gp', '.3gpp',
     '.3g2', '.3gp2',
-    '.mkv',                        # Matroska — exiftool read-only
-    '.webm',                       # Matroska/VP9 — exiftool read-only
-    '.avi',                        # RIFF — exiftool read-only
+    *READ_ONLY_VIDEO_EXTENSIONS,
 }
 
 
@@ -133,11 +136,25 @@ class ExifWriter:
     def is_video(file_path: str) -> bool:
         return os.path.splitext(file_path.lower())[1] in VIDEO_EXTENSIONS
 
+    @staticmethod
+    def is_read_only_video(file_path: str) -> bool:
+        return os.path.splitext(file_path.lower())[1] in READ_ONLY_VIDEO_EXTENSIONS
+
     def write_metadata(self, file_path: str, metadata: Dict[str, Any],
                        previous_metadata: Optional[Dict[str, Any]] = None) -> bool:
         if not self.is_supported_file(file_path):
             logger.warning("Unsupported file type: %s", file_path)
             return False
+
+        # The installed ExifTool does not support writing these containers.
+        # Avoid generating impossible QuickTime tag writes and treat the asset as
+        # a handled no-op so it does not become a recurring write error.
+        if self.is_read_only_video(file_path):
+            logger.info(
+                "Metadata write skipped (read-only video container): %s",
+                file_path,
+            )
+            return True
 
         is_video_file = self.is_video(file_path)
         previous = previous_metadata or {}
@@ -185,9 +202,8 @@ class ExifWriter:
                         getattr(self._get_et(), '_last_stderr', None))
                     ok = False
 
-        # Pass 2: descriptions via a temporary UTF-8 file. PyExifTool's
-        # set_tags() builds -TAG=value arguments, which break on multiline text.
-        # ExifTool's -TAG<=FILE form reads the value directly from the file.
+        # Pass 2: descriptions via a temporary UTF-8 file. ExifTool's
+        # -TAG<=FILE form reads the value directly and safely preserves newlines.
         if tag_dict and ok:
             try:
                 description = next(iter(tag_dict.values()))
@@ -261,8 +277,8 @@ class ExifWriter:
     # ----- parameter building -----
     def _build_params(self, file_path: str, metadata: Dict[str, Any],
                       previous: Dict[str, Any], is_video: bool) -> List[str]:
-        """Build CLI-safe exiftool arguments. Description is excluded — it goes
-        through set_tags() via _build_tag_dict() to handle newlines safely."""
+        """Build CLI-safe ExifTool arguments. Description is handled separately
+        by _build_tag_dict() using a temporary UTF-8 file."""
         params: List[str] = []
         params.extend(self._keyword_params(file_path, metadata, previous, is_video))
         params.extend(self._favorite_params(metadata, previous, is_video))
