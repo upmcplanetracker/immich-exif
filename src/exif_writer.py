@@ -1,3 +1,4 @@
+
 # EXIF writer using a persistent ExifTool subprocess.
 #
 # SAFETY-RELEVANT BEHAVIOR:
@@ -191,7 +192,12 @@ class ExifWriter:
                 logger.debug("ExifTool execute %s", cli_params)
                 result = self._get_et().execute(*cli_params)
             except Exception as e:
-                logger.error("ExifTool execute raised on %s: %s", file_path, e)
+                self._log_execute_exception(
+                    operation="metadata write",
+                    file_path=file_path,
+                    cli_params=cli_params,
+                    exception=e,
+                )
                 ok = False
             else:
                 if self._is_failure(result):
@@ -205,6 +211,7 @@ class ExifWriter:
         # Pass 2: descriptions via a temporary UTF-8 file. ExifTool's
         # -TAG<=FILE form reads the value directly and safely preserves newlines.
         if tag_dict and ok:
+            cli_params: List[str] = []
             try:
                 description = next(iter(tag_dict.values()))
                 with tempfile.NamedTemporaryFile(
@@ -213,7 +220,6 @@ class ExifWriter:
                     description_file.write(description)
                     description_file.flush()
 
-                    cli_params: List[str] = []
                     if not self._keep_backups:
                         cli_params.append('-overwrite_original')
                     for tag in tag_dict:
@@ -233,14 +239,86 @@ class ExifWriter:
                             getattr(self._get_et(), '_last_stderr', None))
                         ok = False
             except Exception as e:
-                logger.error(
-                    "ExifTool description write raised on %s (tags=%s): %s",
-                    file_path, list(tag_dict), e)
+                self._log_execute_exception(
+                    operation="description write",
+                    file_path=file_path,
+                    cli_params=cli_params,
+                    exception=e,
+                    tags=list(tag_dict),
+                )
                 ok = False
 
         if ok:
             logger.debug("EXIF updated for %s", file_path)
         return ok
+
+    # ----- ExifTool exception diagnostics -----
+    def _log_execute_exception(
+        self,
+        operation: str,
+        file_path: str,
+        cli_params: List[str],
+        exception: Exception,
+        tags: Optional[List[str]] = None,
+    ) -> None:
+        """
+        Log the actual ExifTool process diagnostics when execute() raises.
+
+        ExifToolHelper.execute() raises ExifToolExecuteError for a non-zero
+        exit status. The helper stores the process output on its ExifTool
+        instance, so capture those values before another command can replace
+        them.
+        """
+        et = self._et
+
+        # PyExifTool stores these on the persistent ExifTool process object.
+        process_status = getattr(et, '_last_status', None)
+        process_stdout = getattr(et, '_last_stdout', None)
+        process_stderr = getattr(et, '_last_stderr', None)
+
+        # Some PyExifTool versions also expose the same values on the
+        # exception object. Prefer those when present, otherwise use the
+        # process object's saved values.
+        exception_status = getattr(exception, 'status', None)
+        exception_stdout = getattr(exception, 'stdout', None)
+        exception_stderr = getattr(exception, 'stderr', None)
+
+        status = (
+            exception_status
+            if exception_status is not None
+            else process_status
+        )
+        stdout = (
+            exception_stdout
+            if exception_stdout is not None
+            else process_stdout
+        )
+        stderr = (
+            exception_stderr
+            if exception_stderr is not None
+            else process_stderr
+        )
+
+        logger.error(
+            "ExifTool %s raised on %s: %s",
+            operation,
+            file_path,
+            exception,
+        )
+        logger.error(
+            "ExifTool failure diagnostics for %s — "
+            "exit status: %r; stdout: %r; stderr: %r; "
+            "exception type: %s; exception args: %r; "
+            "CLI arguments: %r; tags: %r",
+            file_path,
+            status,
+            stdout,
+            stderr,
+            type(exception).__name__,
+            exception.args,
+            cli_params,
+            tags,
+        )
 
     # ----- output inspection -----
     @staticmethod
