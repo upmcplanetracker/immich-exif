@@ -18,17 +18,101 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from exiftool import ExifToolHelper
-from exiftool.exceptions import ExifToolExecuteError
 
 
 logger = logging.getLogger(__name__)
 
 
+# Extensions where exiftool supports WRITING metadata (R/W in the format table
+# at https://exiftool.org/index.html), filtered to formats Immich ingests.
+# Source: exiftool 13.64 format table, cross-referenced with Immich's supported
+# media list. Read-only formats (3FR, DCR, KDC, etc.) are intentionally excluded
+# — exiftool would open them but refuse to write, producing silent no-ops.
+#
+# Photo / image formats:
+#   JPEG/JPG/JPE    — baseline; always writable
+#   PNG             — writable (XMP, EXIF, IPTC via non-standard chunks)
+#   GIF             — writable (XMP, XMP:dc)
+#   WEBP            — writable (XMP, EXIF, ICC)
+#   TIFF/TIF        — writable (full EXIF/IPTC/XMP)
+#   HEIC/HEIF/HIF   — writable (XMP, QuickTime atoms)
+#   AVIF            — writable (XMP, QuickTime atoms)
+#   JXL             — writable (EXIF, XMP) — JPEG XL, ISO BMFF and codestream
+#   DNG             — writable (full EXIF/IPTC/XMP) — Digital Negative
+#   CR2             — writable (Canon RAW 2, TIFF-based)
+#   CR3             — writable (Canon RAW 3, QuickTime-based)
+#   NEF/NRW         — writable (Nikon RAW, TIFF-based)
+#   ARW/SR2         — writable (Sony RAW, TIFF-based)
+#   RW2             — writable (Panasonic RAW 2)
+#   ORF/ORI         — writable (Olympus RAW, TIFF-based)
+#   RAF             — writable (FujiFilm RAW)
+#   PEF             — writable (Pentax RAW, TIFF-based)
+#   SRW             — writable (Samsung RAW, TIFF-based)
+#   X3F             — writable (Sigma/Foveon RAW)
+#   ERF             — writable (Epson RAW, TIFF-based)
+#   MEF             — writable (Mamiya RAW, TIFF-based)
+#   MOS             — writable (Creo Leaf Mosaic, TIFF-based)
+#   MRW             — writable (Minolta RAW)
+#   RWL             — writable (Leica RAW, Panasonic-based)
+#   IIQ             — writable (Phase One RAW, TIFF-based)
+#   GPR             — writable (GoPro RAW, DNG-based)
+#
+# Video formats (metadata written via QuickTime/XMP atoms):
+#   MP4             — writable
+#   MOV/QT          — writable
+#   M4V             — writable (MPEG-4 Video, QuickTime-based)
+#   M4A             — writable (MPEG-4 Audio, QuickTime-based)
+#   3GP/3GPP        — writable
+#   3G2/3GP2        — writable
+#   MKV             — read-only in exiftool (Matroska); included so the
+#                     tool logs a sensible skip rather than "unsupported"
+#   WEBM            — read-only in exiftool (Matroska); same rationale
+#   AVI             — read-only (RIFF); same rationale
 PHOTO_EXTENSIONS = {
-    '.jpg', '.jpeg', '.png', '.gif', '.webp', '.tiff', '.tif',
-    '.heic', '.heif', '.dng', '.cr2', '.nef', '.arw',
+    # Common consumer formats
+    '.jpg', '.jpeg', '.jpe',
+    '.png',
+    '.gif',
+    '.webp',
+    '.tiff', '.tif',
+    '.heic', '.heif', '.hif',
+    '.avif',
+    '.jxl',                        # JPEG XL — exiftool R/W since ~12.50
+    # RAW formats (all R/W in exiftool)
+    '.dng',
+    '.cr2', '.cr3',                # Canon
+    '.nef', '.nrw',                # Nikon
+    '.arw', '.sr2',                # Sony
+    '.rw2',                        # Panasonic
+    '.orf', '.ori',                # Olympus
+    '.raf',                        # Fujifilm
+    '.pef',                        # Pentax
+    '.srw',                        # Samsung
+    '.x3f',                        # Sigma/Foveon
+    '.erf',                        # Epson
+    '.mef',                        # Mamiya
+    '.mos',                        # Leaf/Creo
+    '.mrw',                        # Minolta
+    '.rwl',                        # Leica
+    '.iiq',                        # Phase One
+    '.gpr',                        # GoPro RAW
 }
-VIDEO_EXTENSIONS = {'.mp4', '.mov', '.avi', '.mkv', '.m4v', '.3gp', '.webm'}
+
+# Videos: exiftool writes QuickTime/XMP atoms for the first group.
+# MKV/WEBM/AVI are read-only in exiftool but Immich stores them, so we
+# include them here and let is_supported_file() pass them through —
+# exiftool will simply make no changes and report "1 image files unchanged",
+# which _is_failure() correctly treats as a non-failure.
+VIDEO_EXTENSIONS = {
+    '.mp4',
+    '.mov', '.qt',
+    '.m4v', '.m4a',
+    '.3gp', '.3gpp',
+    '.3g2', '.3gp2',
+    '.mkv',                        # Matroska — exiftool read-only
+    '.webm',                       # Matroska/VP9 — exiftool read-only
+    '.avi',                        # RIFF — exiftool read-only
+}
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -54,20 +138,10 @@ class ExifWriter:
                 "ExifWriter running WITHOUT backups — ExifTool will overwrite "
                 "originals in place. Set EXIF_KEEP_BACKUPS=1 to restore.")
 
-    @property
-    def dry_run(self) -> bool:
-        """Whether EXIF writes are currently being simulated."""
-        return self._dry_run
-
     # ----- lifecycle -----
     def _get_et(self) -> ExifToolHelper:
         if self._et is None:
-            # check_execute=False: we inspect the returned stdout string ourselves
-            # via _is_failure() rather than relying on exception-based flow for
-            # non-zero exits.  ExifTool exits with status 1 on minor warnings
-            # (e.g. unknown tags suppressed by -m) even when the write succeeded,
-            # so raising unconditionally on status != 0 produces false failures.
-            self._et = ExifToolHelper(common_args=['-m'], check_execute=False)
+            self._et = ExifToolHelper(common_args=['-m'])
         return self._et
 
     def close(self) -> None:
@@ -98,62 +172,68 @@ class ExifWriter:
 
         is_video_file = self.is_video(file_path)
         previous = previous_metadata or {}
-        try:
-            params = self._build_params(file_path, metadata, previous, is_video_file)
-        except Exception as e:
-            # In particular, do not continue with album changes if reading the
-            # existing keywords failed. That could duplicate tags or commit a
-            # state record for a change that was never made.
-            logger.error("Could not prepare metadata for %s: %s", file_path, e)
-            return False
 
-        if not params:
+        # Split into two write passes:
+        #   1. params  — scalar/simple tags via execute() (keywords, GPS, dates,
+        #                favorites). Safe as CLI args.
+        #   2. tag_dict — description, written via set_tags() which sends values
+        #                 through the exiftool JSON pipe and is immune to newlines,
+        #                 special characters, and AI caption markers like [/AI].
+        params = self._build_params(file_path, metadata, previous, is_video_file)
+        tag_dict = self._build_tag_dict(metadata, previous, is_video_file)
+
+        if not params and not tag_dict:
             logger.debug("No EXIF changes needed for %s", file_path)
             return True
 
-        # Explicitly pass -overwrite_original only when backups are disabled.
-        # Otherwise ExifTool's default is to save <file>_original.
-        if not self._keep_backups:
-            params = ['-overwrite_original'] + params
-        params.append(file_path)
-
         if self._dry_run:
-            logger.info("[DRY RUN] exiftool %s", params)
+            if params:
+                logger.info("[DRY RUN] exiftool %s %s", params, file_path)
+            if tag_dict:
+                logger.info("[DRY RUN] exiftool set_tags %s %s", tag_dict, file_path)
             return True
 
-        try:
-            logger.debug("ExifTool params: %s", params)
-            result = self._get_et().execute(*params)
-        except ExifToolExecuteError as e:
-            # check_execute=False means this shouldn't fire, but guard anyway.
-            # Log stdout AND stderr from the exception so the caller can see
-            # the actual ExifTool error message rather than just "exit status 1".
-            logger.error(
-                "ExifTool non-zero exit for %s — stdout: %r  stderr: %r  params: %s",
-                file_path, e.stdout, e.stderr, e.cmd,
-            )
-            return False
-        except Exception as e:
-            logger.error("ExifTool unexpected error for %s: %s", file_path, e)
-            return False
+        ok = True
 
-        # Surface stderr from the last call even on a clean return, so warnings
-        # are visible in logs without requiring DEBUG level.
-        stderr_text = getattr(self._et, 'last_stderr', '') or ''
-        if stderr_text.strip():
-            logger.warning("ExifTool stderr for %s: %s", file_path, stderr_text.strip())
+        # Pass 1: CLI-safe params via execute().
+        if params:
+            cli_params = list(params)
+            if not self._keep_backups:
+                cli_params = ['-overwrite_original'] + cli_params
+            cli_params.append(file_path)
+            try:
+                logger.debug("ExifTool execute %s", cli_params)
+                result = self._get_et().execute(*cli_params)
+            except Exception as e:
+                logger.error("ExifTool execute raised on %s: %s", file_path, e)
+                ok = False
+            else:
+                if self._is_failure(result):
+                    logger.error(
+                        "ExifTool reported failure for %s — stdout: %r  stderr: %r",
+                        file_path,
+                        result if isinstance(result, str) else None,
+                        getattr(self._get_et(), '_last_stderr', None))
+                    ok = False
 
-        if self._is_failure(result):
-            stdout_text = getattr(self._et, 'last_stdout', result) or result
-            logger.error(
-                "ExifTool reported failure for %s — stdout: %r  stderr: %r",
-                file_path, stdout_text, stderr_text,
-            )
-            return False
+        # Pass 2: description via set_tags() — values go through JSON pipe,
+        # so newlines and special characters are never parsed as CLI args.
+        if tag_dict and ok:
+            extra: List[str] = []
+            if not self._keep_backups:
+                extra = ['-overwrite_original']
+            try:
+                logger.debug("ExifTool set_tags %s on %s", tag_dict, file_path)
+                self._get_et().set_tags(
+                    file_path, tags=tag_dict, params=extra or None)
+            except Exception as e:
+                logger.error("ExifTool set_tags raised on %s: %s", file_path, e)
+                ok = False
 
-        logger.debug("EXIF updated for %s", file_path)
-        return True
-                          
+        if ok:
+            logger.debug("EXIF updated for %s", file_path)
+        return ok
+
     # ----- output inspection -----
     @staticmethod
     def _is_failure(result: Optional[str]) -> bool:
@@ -167,40 +247,53 @@ class ExifWriter:
 
         lower = s.lower()
 
-        # Hard failure phrases ExifTool emits on write errors.
-        if "weren't updated" in lower or 'could not be written' in lower:
+        # Hard failure strings exiftool emits on write errors.
+        if "weren't updated" in lower or 'could not be' in lower:
             return True
 
-        # "N image files updated" — failure only when N == 0.
-        # Check this BEFORE the generic 'error' scan so that a warning line
-        # above an "updated" line doesn't cause a false failure.
+        # "N image files updated" — failure only if N == 0.
         m = re.search(r'(\d+)\s+(?:image\s+)?files?\s+updated', lower)
         if m:
             return int(m.group(1)) == 0
 
-        # "N image files unchanged" — tags already matched, not a failure.
-        if re.search(r'\d+\s+(?:image\s+)?files?\s+unchanged', lower):
+        # "N image files unchanged" (tags already matched) — not a failure.
+        m = re.search(r'(\d+)\s+(?:image\s+)?files?\s+unchanged', lower)
+        if m:
             return False
 
-        # Generic error keyword — only reached when no update/unchanged count
-        # was present (e.g. a pure error with no files processed at all).
         if 'error' in lower:
             return True
 
-        # Unknown non-empty output — assume success rather than mis-reporting
-        # every write as failed.
+        # Unknown output from a non-empty, non-error string — assume success
+        # rather than mis-reporting every write as failed.
         return False
 
     # ----- parameter building -----
     def _build_params(self, file_path: str, metadata: Dict[str, Any],
                      previous: Dict[str, Any], is_video: bool) -> List[str]:
+        """Build CLI-safe exiftool arguments. Description is excluded — it goes
+        through set_tags() via _build_tag_dict() to handle newlines safely."""
         params: List[str] = []
         params.extend(self._keyword_params(file_path, metadata, previous, is_video))
         params.extend(self._favorite_params(metadata, previous, is_video))
-        params.extend(self._description_params(metadata, previous, is_video))
         params.extend(self._location_params(metadata, previous))
         params.extend(self._datetime_params(metadata, previous, is_video))
         return params
+
+    def _build_tag_dict(self, metadata: Dict[str, Any], previous: Dict[str, Any],
+                        is_video: bool) -> Dict[str, Any]:
+        """Build a tag dict for set_tags() — safe for any string value.
+        Currently handles description only, since all other tags are scalar/enum
+        values that are safe as CLI args."""
+        cur = metadata.get('description', '') or ''
+        prev = previous.get('description', '') or ''
+        if cur == prev:
+            return {}
+        if is_video:
+            return {'QuickTime:Description': cur} if cur else {'QuickTime:Description': ''}
+        if cur:
+            return {'EXIF:ImageDescription': cur, 'XMP:Description': cur}
+        return {'EXIF:ImageDescription': '', 'XMP:Description': ''}
 
     def _keyword_params(self, file_path: str, metadata: Dict[str, Any],
                        previous: Dict[str, Any], is_video: bool) -> List[str]:
@@ -241,8 +334,8 @@ class ExifWriter:
         try:
             result = self._get_et().get_tags(file_path, tags=tags_to_read)
         except Exception as e:
-            logger.error("Could not read %s from %s: %s", tag, file_path, e)
-            raise RuntimeError(f"Could not safely read {tag} from {file_path}") from e
+            logger.warning("Could not read %s from %s: %s", tag, file_path, e)
+            return []
         if not result:
             return []
         row = result[0]
@@ -278,20 +371,6 @@ class ExifWriter:
             return []
         tag = 'QuickTime:Rating' if is_video else 'XMP:Rating'
         return [f'-{tag}=5' if cur else f'-{tag}=']
-
-    @staticmethod
-    def _description_params(metadata: Dict[str, Any], previous: Dict[str, Any],
-                           is_video: bool) -> List[str]:
-        cur = metadata.get('description', '') or ''
-        prev = previous.get('description', '') or ''
-        if cur == prev:
-            return []
-        if is_video:
-            return [f'-QuickTime:Description={cur}'
-                    if cur else '-QuickTime:Description=']
-        if cur:
-            return [f'-EXIF:ImageDescription={cur}', f'-XMP:Description={cur}']
-        return ['-EXIF:ImageDescription=', '-XMP:Description=']
 
     @staticmethod
     def _location_params(metadata: Dict[str, Any],
@@ -384,24 +463,19 @@ class ExifWriter:
                 params = [f'-QuickTime:CreateDate={cur}',
                           f'-QuickTime:ModifyDate={cur}']
                 # QuickTime stores timezone as a UTC offset in a separate atom.
-                params.append(
-                    f'-QuickTime:OffsetTime={offset}' if offset
-                    else '-QuickTime:OffsetTime='
-                )
+                if offset:
+                    params.append(f'-QuickTime:OffsetTime={offset}')
                 return params
             return ['-QuickTime:CreateDate=', '-QuickTime:ModifyDate=',
                     '-QuickTime:OffsetTime=']
 
         if cur:
             params = [f'-EXIF:DateTimeOriginal={cur}', f'-EXIF:CreateDate={cur}']
-            # Clear old offsets when the new Immich timestamp has no zone.
-            # Otherwise a previous timezone can remain attached to a new date.
-            params += [
-                f'-EXIF:OffsetTimeOriginal={offset}' if offset
-                else '-EXIF:OffsetTimeOriginal=',
-                f'-EXIF:OffsetTime={offset}' if offset
-                else '-EXIF:OffsetTime=',
-            ]
+            if offset:
+                # OffsetTimeOriginal pairs with DateTimeOriginal; OffsetTime
+                # pairs with ModifyDate/CreateDate.
+                params += [f'-EXIF:OffsetTimeOriginal={offset}',
+                           f'-EXIF:OffsetTime={offset}']
             return params
         return ['-EXIF:DateTimeOriginal=', '-EXIF:CreateDate=',
                 '-EXIF:OffsetTimeOriginal=', '-EXIF:OffsetTime=']
