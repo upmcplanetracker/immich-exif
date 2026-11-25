@@ -1,19 +1,17 @@
-
 # EXIF writer using a persistent ExifTool subprocess.
 #
 # SAFETY-RELEVANT BEHAVIOR:
 #   * EXIF_DRY_RUN=1 (default 0) — log every intended command, write nothing.
-#   * EXIF_KEEP_BACKUPS=1 (default 1) — ExifTool keeps a <file>_original copy.
-#     Set to 0 only after you trust the tool.
+#   * EXIF_KEEP_BACKUPS=1 (default 1) — retain a <file>_original backup.
 #   * Keywords: only keywords that are BOTH on disk AND in
-#     previous_metadata['albums'] are removable. Anything else is presumed
-#     user-authored and is preserved.
-#   * GPS: written with abs(value) + explicit N/S/E/W Ref tags so the sign
-#     can never be lost.
+#     previous_metadata['albums'] are removable. Anything else is preserved.
+#   * GPS: written with abs(value) + explicit N/S/E/W Ref tags.
 #   * Dates: ISO 8601 is normalized to EXIF 'YYYY:MM:DD HH:MM:SS'.
-#     Unparseable input is skipped (never written as garbage).
+#   * JPEG data stored under a HEIC-family extension is staged as a .jpg
+#     during metadata writes, then atomically put back under its original name.
 import logging
 import os
+import shutil
 import tempfile
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
@@ -24,13 +22,7 @@ from exiftool import ExifToolHelper
 logger = logging.getLogger(__name__)
 
 
-# Extensions where exiftool supports WRITING metadata (R/W in the format table
-# at https://exiftool.org/index.html), filtered to formats Immich ingests.
-# Source: exiftool 13.64 format table, cross-referenced with Immich's supported
-# media list. Read-only formats (3FR, DCR, KDC, etc.) are intentionally excluded
-# — exiftool would open them but refuse to write, producing silent no-ops.
 PHOTO_EXTENSIONS = {
-    # Common consumer formats
     '.jpg', '.jpeg', '.jpe',
     '.png',
     '.gif',
@@ -38,31 +30,26 @@ PHOTO_EXTENSIONS = {
     '.tiff', '.tif',
     '.heic', '.heif', '.hif',
     '.avif',
-    '.jxl',                        # JPEG XL — exiftool R/W since ~12.50
-    # RAW formats (all R/W in exiftool)
+    '.jxl',
     '.dng',
-    '.cr2', '.cr3',                # Canon
-    '.nef', '.nrw',                # Nikon
-    '.arw', '.sr2',                # Sony
-    '.rw2',                        # Panasonic
-    '.orf', '.ori',                # Olympus
-    '.raf',                        # Fujifilm
-    '.pef',                        # Pentax
-    '.srw',                        # Samsung
-    '.x3f',                        # Sigma/Foveon
-    '.erf',                        # Epson
-    '.mef',                        # Mamiya
-    '.mos',                        # Leaf/Creo
-    '.mrw',                        # Minolta
-    '.rwl',                        # Leica
-    '.iiq',                        # Phase One
-    '.gpr',                        # GoPro RAW
+    '.cr2', '.cr3',
+    '.nef', '.nrw',
+    '.arw', '.sr2',
+    '.rw2',
+    '.orf', '.ori',
+    '.raf',
+    '.pef',
+    '.srw',
+    '.x3f',
+    '.erf',
+    '.mef',
+    '.mos',
+    '.mrw',
+    '.rwl',
+    '.iiq',
+    '.gpr',
 }
 
-# Video formats Immich may contain.
-# ExifTool can write metadata to the first group, but the installed ExifTool
-# does not list MKV, WEBM, or AVI as writable formats. Those are handled as
-# read-only assets and skipped by write_metadata() without invoking ExifTool.
 READ_ONLY_VIDEO_EXTENSIONS = {
     '.mkv',
     '.webm',
@@ -77,6 +64,8 @@ VIDEO_EXTENSIONS = {
     '.3g2', '.3gp2',
     *READ_ONLY_VIDEO_EXTENSIONS,
 }
+
+HEIC_FAMILY_EXTENSIONS = {'.heic', '.heif', '.hif'}
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -99,8 +88,8 @@ class ExifWriter:
                 "ExifWriter running in DRY-RUN mode — no files will be modified.")
         elif not self._keep_backups:
             logger.warning(
-                "ExifWriter running WITHOUT backups — ExifTool will overwrite "
-                "originals in place. Set EXIF_KEEP_BACKUPS=1 to restore.")
+                "ExifWriter running WITHOUT backups — originals will be "
+                "overwritten after successful staged writes.")
 
     @property
     def dry_run(self) -> bool:
@@ -141,15 +130,30 @@ class ExifWriter:
     def is_read_only_video(file_path: str) -> bool:
         return os.path.splitext(file_path.lower())[1] in READ_ONLY_VIDEO_EXTENSIONS
 
+    @staticmethod
+    def _is_jpeg_content(file_path: str) -> bool:
+        """Identify JPEG data by its file signature, independent of extension."""
+        try:
+            with open(file_path, 'rb') as image_file:
+                return image_file.read(3) == b'\xff\xd8\xff'
+        except OSError as e:
+            logger.warning("Could not inspect image signature for %s: %s",
+                           file_path, e)
+            return False
+
+    def _needs_jpeg_extension_override(self, file_path: str) -> bool:
+        ext = os.path.splitext(file_path.lower())[1]
+        return (
+            ext in HEIC_FAMILY_EXTENSIONS
+            and self._is_jpeg_content(file_path)
+        )
+
     def write_metadata(self, file_path: str, metadata: Dict[str, Any],
                        previous_metadata: Optional[Dict[str, Any]] = None) -> bool:
         if not self.is_supported_file(file_path):
             logger.warning("Unsupported file type: %s", file_path)
             return False
 
-        # The installed ExifTool does not support writing these containers.
-        # Avoid generating impossible QuickTime tag writes and treat the asset as
-        # a handled no-op so it does not become a recurring write error.
         if self.is_read_only_video(file_path):
             logger.info(
                 "Metadata write skipped (read-only video container): %s",
@@ -160,12 +164,6 @@ class ExifWriter:
         is_video_file = self.is_video(file_path)
         previous = previous_metadata or {}
 
-        # Split into two write passes:
-        #   1. params — scalar/simple tags via execute() (keywords, GPS, dates,
-        #               favorites). Safe as CLI args once sanitized.
-        #   2. tag_dict — descriptions written from a temporary UTF-8 text file
-        #               using ExifTool's -TAG<=FILE syntax. This safely preserves
-        #               multiline captions without passing their text as arguments.
         params = self._build_params(file_path, metadata, previous, is_video_file)
         tag_dict = self._build_tag_dict(metadata, previous, is_video_file)
 
@@ -178,16 +176,108 @@ class ExifWriter:
                 logger.info("[DRY RUN] exiftool %s %s", params, file_path)
             if tag_dict:
                 logger.info("[DRY RUN] exiftool set_tags %s %s", tag_dict, file_path)
+            if self._needs_jpeg_extension_override(file_path):
+                logger.info(
+                    "[DRY RUN] Would stage JPEG content under a temporary .jpg "
+                    "name while preserving original path: %s",
+                    file_path,
+                )
             return True
 
+        # ExifTool uses the filename extension when deciding how to write some
+        # formats. A JPEG with a .heic/.heif/.hif name is therefore rejected.
+        # Stage a same-directory .jpg copy, write that copy, then atomically
+        # replace the original file contents without changing its pathname.
+        if self._needs_jpeg_extension_override(file_path):
+            return self._write_jpeg_with_extension_override(
+                file_path, params, tag_dict
+            )
+
+        return self._perform_write_passes(
+            file_path, params, tag_dict, force_overwrite=not self._keep_backups
+        )
+
+    def _write_jpeg_with_extension_override(
+        self,
+        file_path: str,
+        params: List[str],
+        tag_dict: Dict[str, Any],
+    ) -> bool:
+        directory = os.path.dirname(file_path) or '.'
+        temp_path: Optional[str] = None
+
+        try:
+            fd, temp_path = tempfile.mkstemp(
+                prefix='.immich-exif-', suffix='.jpg', dir=directory
+            )
+            os.close(fd)
+
+            # copy2 preserves timestamps and mode as well as file contents.
+            shutil.copy2(file_path, temp_path)
+
+            logger.info(
+                "Detected JPEG content with HEIC-family extension; staging "
+                "metadata write as JPEG: %s -> %s",
+                file_path, temp_path,
+            )
+
+            # The temporary working copy is disposable. Disable ExifTool's
+            # own backup on it; the original-path backup is made below instead.
+            if not self._perform_write_passes(
+                temp_path, params, tag_dict, force_overwrite=True
+            ):
+                logger.error(
+                    "Staged JPEG metadata write failed; original left untouched: %s",
+                    file_path,
+                )
+                return False
+
+            if self._keep_backups:
+                backup_path = file_path + '_original'
+                shutil.copy2(file_path, backup_path)
+                logger.info("Original file backup created: %s", backup_path)
+
+            # temp_path is in the same directory, so replace is atomic.
+            os.replace(temp_path, file_path)
+            temp_path = None
+            logger.info(
+                "JPEG metadata write committed; original filename preserved: %s",
+                file_path,
+            )
+            return True
+
+        except Exception:
+            logger.exception(
+                "Could not complete staged JPEG write for %s; "
+                "original file was not intentionally modified",
+                file_path,
+            )
+            return False
+        finally:
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    os.unlink(temp_path)
+                except OSError as e:
+                    logger.warning(
+                        "Could not remove temporary file %s: %s", temp_path, e
+                    )
+
+    def _perform_write_passes(
+        self,
+        file_path: str,
+        params: List[str],
+        tag_dict: Dict[str, Any],
+        force_overwrite: bool,
+    ) -> bool:
+        """Run the existing scalar-tag and multiline-description write passes."""
         ok = True
 
-        # Pass 1: CLI-safe params via execute().
         if params:
             cli_params = list(params)
-            if not self._keep_backups:
+            if force_overwrite:
                 cli_params = ['-overwrite_original'] + cli_params
             cli_params.append(file_path)
+
             try:
                 logger.debug("ExifTool execute %s", cli_params)
                 result = self._get_et().execute(*cli_params)
@@ -202,14 +292,13 @@ class ExifWriter:
             else:
                 if self._is_failure(result):
                     logger.error(
-                        "ExifTool reported failure for %s — stdout: %r  stderr: %r",
+                        "ExifTool reported failure for %s — stdout: %r stderr: %r",
                         file_path,
                         result if isinstance(result, str) else None,
-                        getattr(self._get_et(), '_last_stderr', None))
+                        getattr(self._get_et(), '_last_stderr', None),
+                    )
                     ok = False
 
-        # Pass 2: descriptions via a temporary UTF-8 file. ExifTool's
-        # -TAG<=FILE form reads the value directly and safely preserves newlines.
         if tag_dict and ok:
             cli_params: List[str] = []
             try:
@@ -220,7 +309,7 @@ class ExifWriter:
                     description_file.write(description)
                     description_file.flush()
 
-                    if not self._keep_backups:
+                    if force_overwrite:
                         cli_params.append('-overwrite_original')
                     for tag in tag_dict:
                         cli_params.append(f'-{tag}<={description_file.name}')
@@ -229,14 +318,16 @@ class ExifWriter:
                     logger.debug(
                         "ExifTool description write using temporary file %s "
                         "for tags %s on %s",
-                        description_file.name, list(tag_dict), file_path)
+                        description_file.name, list(tag_dict), file_path,
+                    )
                     result = self._get_et().execute(*cli_params)
                     if self._is_failure(result):
                         logger.error(
                             "ExifTool description write failed for %s — "
                             "stdout: %r stderr: %r",
                             file_path, result,
-                            getattr(self._get_et(), '_last_stderr', None))
+                            getattr(self._get_et(), '_last_stderr', None),
+                        )
                         ok = False
             except Exception as e:
                 self._log_execute_exception(
@@ -261,70 +352,38 @@ class ExifWriter:
         exception: Exception,
         tags: Optional[List[str]] = None,
     ) -> None:
-        """
-        Log the actual ExifTool process diagnostics when execute() raises.
-
-        ExifToolHelper.execute() raises ExifToolExecuteError for a non-zero
-        exit status. The helper stores the process output on its ExifTool
-        instance, so capture those values before another command can replace
-        them.
-        """
         et = self._et
-
-        # PyExifTool stores these on the persistent ExifTool process object.
         process_status = getattr(et, '_last_status', None)
         process_stdout = getattr(et, '_last_stdout', None)
         process_stderr = getattr(et, '_last_stderr', None)
 
-        # Some PyExifTool versions also expose the same values on the
-        # exception object. Prefer those when present, otherwise use the
-        # process object's saved values.
-        exception_status = getattr(exception, 'status', None)
-        exception_stdout = getattr(exception, 'stdout', None)
-        exception_stderr = getattr(exception, 'stderr', None)
+        status = getattr(exception, 'status', None)
+        stdout = getattr(exception, 'stdout', None)
+        stderr = getattr(exception, 'stderr', None)
 
-        status = (
-            exception_status
-            if exception_status is not None
-            else process_status
-        )
-        stdout = (
-            exception_stdout
-            if exception_stdout is not None
-            else process_stdout
-        )
-        stderr = (
-            exception_stderr
-            if exception_stderr is not None
-            else process_stderr
-        )
+        if status is None:
+            status = process_status
+        if stdout is None:
+            stdout = process_stdout
+        if stderr is None:
+            stderr = process_stderr
 
         logger.error(
             "ExifTool %s raised on %s: %s",
-            operation,
-            file_path,
-            exception,
+            operation, file_path, exception,
         )
         logger.error(
             "ExifTool failure diagnostics for %s — "
             "exit status: %r; stdout: %r; stderr: %r; "
             "exception type: %s; exception args: %r; "
             "CLI arguments: %r; tags: %r",
-            file_path,
-            status,
-            stdout,
-            stderr,
-            type(exception).__name__,
-            exception.args,
-            cli_params,
-            tags,
+            file_path, status, stdout, stderr,
+            type(exception).__name__, exception.args, cli_params, tags,
         )
 
     # ----- output inspection -----
     @staticmethod
     def _is_failure(result: Optional[str]) -> bool:
-        # PyExifTool's execute() may return None when stdout is consumed
-        # internally and no error occurred.
         if result is None:
             return False
         s = result.strip()
@@ -332,18 +391,14 @@ class ExifWriter:
             return False
 
         lower = s.lower()
-
-        # Hard failure strings exiftool emits on write errors.
         if "weren't updated" in lower or 'could not be' in lower:
             return True
 
-        # "N image files updated" — failure only if N == 0.
         if 'updated' in lower:
             for token in lower.replace('\n', ' ').split():
                 if token.isdigit():
                     return int(token) == 0
 
-        # "N image files unchanged" (tags already matched) — not a failure.
         if 'unchanged' in lower:
             return False
 
@@ -355,8 +410,6 @@ class ExifWriter:
     # ----- parameter building -----
     def _build_params(self, file_path: str, metadata: Dict[str, Any],
                       previous: Dict[str, Any], is_video: bool) -> List[str]:
-        """Build CLI-safe ExifTool arguments. Description is handled separately
-        by _build_tag_dict() using a temporary UTF-8 file."""
         params: List[str] = []
         params.extend(self._keyword_params(file_path, metadata, previous, is_video))
         params.extend(self._favorite_params(metadata, previous, is_video))
@@ -366,7 +419,6 @@ class ExifWriter:
 
     def _build_tag_dict(self, metadata: Dict[str, Any], previous: Dict[str, Any],
                         is_video: bool) -> Dict[str, Any]:
-        """Build description tag/value pairs for file-based ExifTool writes."""
         cur = metadata.get('description', '') or ''
         prev = previous.get('description', '') or ''
         if cur == prev:
@@ -377,7 +429,6 @@ class ExifWriter:
 
     @staticmethod
     def _sanitize_arg_value(val: Any) -> str:
-        """Flatten newlines/CRs so values cannot split into extra ExifTool args."""
         if val is None:
             return ''
         return ' '.join(str(val).splitlines()).strip()
@@ -497,7 +548,6 @@ class ExifWriter:
 
     @staticmethod
     def _normalize_datetime(raw: str) -> Tuple[str, Optional[str]]:
-        """Parse a date string into (exif_datetime, offset_or_None)."""
         if not raw:
             return '', None
         s = str(raw).strip()
