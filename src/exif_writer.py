@@ -186,6 +186,7 @@ class ExifWriter:
 
         # Pass 2: description via set_tags() — values go through JSON pipe,
         # so newlines and special characters are never parsed as CLI args.
+
         if tag_dict and ok:
             extra: List[str] = []
             if not self._keep_backups:
@@ -195,7 +196,13 @@ class ExifWriter:
                 self._get_et().set_tags(
                     file_path, tags=tag_dict, params=extra or None)
             except Exception as e:
-                logger.error("ExifTool set_tags raised on %s: %s", file_path, e)
+                logger.error(
+                    "ExifTool set_tags raised on %s (tags=%r, stderr=%r): %s",
+                    file_path,
+                    tag_dict,
+                    getattr(e, 'stderr', None),
+                    e,
+                )
                 ok = False
 
         if ok:
