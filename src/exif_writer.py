@@ -13,8 +13,7 @@
 #     Unparseable input is skipped (never written as garbage).
 import logging
 import os
-import re
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from exiftool import ExifToolHelper
@@ -126,9 +125,9 @@ class ExifWriter:
     def __init__(self, dry_run: Optional[bool] = None,
                  keep_backups: Optional[bool] = None):
         self._dry_run = (_env_bool('EXIF_DRY_RUN', False)
-                        if dry_run is None else dry_run)
+                         if dry_run is None else dry_run)
         self._keep_backups = (_env_bool('EXIF_KEEP_BACKUPS', True)
-                             if keep_backups is None else keep_backups)
+                              if keep_backups is None else keep_backups)
         self._et: Optional[ExifToolHelper] = None
         if self._dry_run:
             logger.warning(
@@ -165,7 +164,7 @@ class ExifWriter:
         return os.path.splitext(file_path.lower())[1] in VIDEO_EXTENSIONS
 
     def write_metadata(self, file_path: str, metadata: Dict[str, Any],
-                      previous_metadata: Optional[Dict[str, Any]] = None) -> bool:
+                       previous_metadata: Optional[Dict[str, Any]] = None) -> bool:
         if not self.is_supported_file(file_path):
             logger.warning("Unsupported file type: %s", file_path)
             return False
@@ -252,13 +251,14 @@ class ExifWriter:
             return True
 
         # "N image files updated" — failure only if N == 0.
-        m = re.search(r'(\d+)\s+(?:image\s+)?files?\s+updated', lower)
-        if m:
-            return int(m.group(1)) == 0
+        if 'updated' in lower:
+            for token in lower.replace('\n', ' ').split():
+                if token.isdigit():
+                    return int(token) == 0
+                    break
 
         # "N image files unchanged" (tags already matched) — not a failure.
-        m = re.search(r'(\d+)\s+(?:image\s+)?files?\s+unchanged', lower)
-        if m:
+        if 'unchanged' in lower:
             return False
 
         if 'error' in lower:
@@ -270,7 +270,7 @@ class ExifWriter:
 
     # ----- parameter building -----
     def _build_params(self, file_path: str, metadata: Dict[str, Any],
-                     previous: Dict[str, Any], is_video: bool) -> List[str]:
+                      previous: Dict[str, Any], is_video: bool) -> List[str]:
         """Build CLI-safe exiftool arguments. Description is excluded — it goes
         through set_tags() via _build_tag_dict() to handle newlines safely."""
         params: List[str] = []
@@ -290,15 +290,26 @@ class ExifWriter:
         if cur == prev:
             return {}
         if is_video:
-            return {'QuickTime:Description': cur} if cur else {'QuickTime:Description': ''}
-        if cur:
-            return {'EXIF:ImageDescription': cur, 'XMP:Description': cur}
-        return {'EXIF:ImageDescription': '', 'XMP:Description': ''}
+            return {'QuickTime:Description': cur}
+        return {'EXIF:ImageDescription': cur, 'XMP:Description': cur}
+
+    @staticmethod
+    def _sanitize_arg_value(val: Any) -> str:
+        """Flatten newlines/CRs so values cannot split into extra ExifTool args."""
+        if val is None:
+            return ''
+        return ' '.join(str(val).splitlines()).strip()
 
     def _keyword_params(self, file_path: str, metadata: Dict[str, Any],
-                       previous: Dict[str, Any], is_video: bool) -> List[str]:
-        current = list(metadata.get('albums') or [])
-        prev = list(previous.get('albums') or [])
+                        previous: Dict[str, Any], is_video: bool) -> List[str]:
+        current = [
+            cleaned for item in (metadata.get('albums') or [])
+            if (cleaned := self._sanitize_arg_value(item))
+        ]
+        prev = [
+            cleaned for item in (previous.get('albums') or [])
+            if (cleaned := self._sanitize_arg_value(item))
+        ]
 
         if current == prev:
             return []  # fast path: no album change, don't touch the file
@@ -316,11 +327,9 @@ class ExifWriter:
 
         params: List[str] = []
         for kw in to_remove:
-            if kw:
-                params.append(f'-{tag}-={kw}')
+            params.append(f'-{tag}-={kw}')
         for kw in to_add:
-            if kw:
-                params.append(f'-{tag}+={kw}')
+            params.append(f'-{tag}+={kw}')
         return params
 
     def _read_keywords(self, file_path: str, tag: str) -> List[str]:
@@ -364,7 +373,7 @@ class ExifWriter:
 
     @staticmethod
     def _favorite_params(metadata: Dict[str, Any], previous: Dict[str, Any],
-                        is_video: bool) -> List[str]:
+                         is_video: bool) -> List[str]:
         cur = bool(metadata.get('is_favorite', False))
         prev = bool(previous.get('is_favorite', False))
         if cur == prev:
@@ -374,7 +383,7 @@ class ExifWriter:
 
     @staticmethod
     def _location_params(metadata: Dict[str, Any],
-                        previous: Dict[str, Any]) -> List[str]:
+                         previous: Dict[str, Any]) -> List[str]:
         lat, lon = metadata.get('latitude'), metadata.get('longitude')
         p_lat, p_lon = previous.get('latitude'), previous.get('longitude')
         if lat == p_lat and lon == p_lon:
@@ -447,7 +456,7 @@ class ExifWriter:
             return '', None
 
     def _datetime_params(self, metadata: Dict[str, Any], previous: Dict[str, Any],
-                        is_video: bool) -> List[str]:
+                         is_video: bool) -> List[str]:
         cur_raw = metadata.get('date_time', '') or ''
         prev_raw = previous.get('date_time', '') or ''
         if cur_raw == prev_raw:
