@@ -27,46 +27,6 @@ logger = logging.getLogger(__name__)
 # Source: exiftool 13.64 format table, cross-referenced with Immich's supported
 # media list. Read-only formats (3FR, DCR, KDC, etc.) are intentionally excluded
 # — exiftool would open them but refuse to write, producing silent no-ops.
-#
-# Photo / image formats:
-#   JPEG/JPG/JPE    — baseline; always writable
-#   PNG             — writable (XMP, EXIF, IPTC via non-standard chunks)
-#   GIF             — writable (XMP, XMP:dc)
-#   WEBP            — writable (XMP, EXIF, ICC)
-#   TIFF/TIF        — writable (full EXIF/IPTC/XMP)
-#   HEIC/HEIF/HIF   — writable (XMP, QuickTime atoms)
-#   AVIF            — writable (XMP, QuickTime atoms)
-#   JXL             — writable (EXIF, XMP) — JPEG XL, ISO BMFF and codestream
-#   DNG             — writable (full EXIF/IPTC/XMP) — Digital Negative
-#   CR2             — writable (Canon RAW 2, TIFF-based)
-#   CR3             — writable (Canon RAW 3, QuickTime-based)
-#   NEF/NRW         — writable (Nikon RAW, TIFF-based)
-#   ARW/SR2         — writable (Sony RAW, TIFF-based)
-#   RW2             — writable (Panasonic RAW 2)
-#   ORF/ORI         — writable (Olympus RAW, TIFF-based)
-#   RAF             — writable (FujiFilm RAW)
-#   PEF             — writable (Pentax RAW, TIFF-based)
-#   SRW             — writable (Samsung RAW, TIFF-based)
-#   X3F             — writable (Sigma/Foveon RAW)
-#   ERF             — writable (Epson RAW, TIFF-based)
-#   MEF             — writable (Mamiya RAW, TIFF-based)
-#   MOS             — writable (Creo Leaf Mosaic, TIFF-based)
-#   MRW             — writable (Minolta RAW)
-#   RWL             — writable (Leica RAW, Panasonic-based)
-#   IIQ             — writable (Phase One RAW, TIFF-based)
-#   GPR             — writable (GoPro RAW, DNG-based)
-#
-# Video formats (metadata written via QuickTime/XMP atoms):
-#   MP4             — writable
-#   MOV/QT          — writable
-#   M4V             — writable (MPEG-4 Video, QuickTime-based)
-#   M4A             — writable (MPEG-4 Audio, QuickTime-based)
-#   3GP/3GPP        — writable
-#   3G2/3GP2        — writable
-#   MKV             — read-only in exiftool (Matroska); included so the
-#                     tool logs a sensible skip rather than "unsupported"
-#   WEBM            — read-only in exiftool (Matroska); same rationale
-#   AVI             — read-only (RIFF); same rationale
 PHOTO_EXTENSIONS = {
     # Common consumer formats
     '.jpg', '.jpeg', '.jpe',
@@ -137,10 +97,19 @@ class ExifWriter:
                 "ExifWriter running WITHOUT backups — ExifTool will overwrite "
                 "originals in place. Set EXIF_KEEP_BACKUPS=1 to restore.")
 
+    @property
+    def dry_run(self) -> bool:
+        return self._dry_run
+
+    @property
+    def keep_backups(self) -> bool:
+        return self._keep_backups
+
     # ----- lifecycle -----
     def _get_et(self) -> ExifToolHelper:
         if self._et is None:
-            self._et = ExifToolHelper(common_args=['-m'])
+            self._et = ExifToolHelper(
+                common_args=['-m', '-charset', 'iptc=UTF8'])
         return self._et
 
     def close(self) -> None:
@@ -174,7 +143,7 @@ class ExifWriter:
 
         # Split into two write passes:
         #   1. params  — scalar/simple tags via execute() (keywords, GPS, dates,
-        #                favorites). Safe as CLI args.
+        #                favorites). Safe as CLI args once sanitized.
         #   2. tag_dict — description, written via set_tags() which sends values
         #                 through the exiftool JSON pipe and is immune to newlines,
         #                 special characters, and AI caption markers like [/AI].
@@ -236,13 +205,13 @@ class ExifWriter:
     # ----- output inspection -----
     @staticmethod
     def _is_failure(result: Optional[str]) -> bool:
-        # PyExifTool 0.5.6's execute() returns None when exiftool exits cleanly
-        # (stdout is consumed internally and not surfaced). Treat None as success.
+        # PyExifTool's execute() may return None when stdout is consumed
+        # internally and no error occurred.
         if result is None:
             return False
         s = result.strip()
         if not s:
-            return False  # empty string — also fine
+            return False
 
         lower = s.lower()
 
@@ -255,7 +224,6 @@ class ExifWriter:
             for token in lower.replace('\n', ' ').split():
                 if token.isdigit():
                     return int(token) == 0
-                    break
 
         # "N image files unchanged" (tags already matched) — not a failure.
         if 'unchanged' in lower:
@@ -264,8 +232,6 @@ class ExifWriter:
         if 'error' in lower:
             return True
 
-        # Unknown output from a non-empty, non-error string — assume success
-        # rather than mis-reporting every write as failed.
         return False
 
     # ----- parameter building -----
@@ -282,9 +248,7 @@ class ExifWriter:
 
     def _build_tag_dict(self, metadata: Dict[str, Any], previous: Dict[str, Any],
                         is_video: bool) -> Dict[str, Any]:
-        """Build a tag dict for set_tags() — safe for any string value.
-        Currently handles description only, since all other tags are scalar/enum
-        values that are safe as CLI args."""
+        """Build a tag dict for set_tags() — safe for any string value."""
         cur = metadata.get('description', '') or ''
         prev = previous.get('description', '') or ''
         if cur == prev:
@@ -312,7 +276,7 @@ class ExifWriter:
         ]
 
         if current == prev:
-            return []  # fast path: no album change, don't touch the file
+            return []
 
         tag = 'XMP:Subject' if is_video else 'IPTC:Keywords'
         existing = self._read_keywords(file_path, tag)
@@ -327,15 +291,16 @@ class ExifWriter:
 
         params: List[str] = []
         for kw in to_remove:
-            params.append(f'-{tag}-={kw}')
+            clean_kw = self._sanitize_arg_value(kw)
+            if clean_kw:
+                params.append(f'-{tag}-={clean_kw}')
         for kw in to_add:
-            params.append(f'-{tag}+={kw}')
+            clean_kw = self._sanitize_arg_value(kw)
+            if clean_kw:
+                params.append(f'-{tag}+={clean_kw}')
         return params
 
     def _read_keywords(self, file_path: str, tag: str) -> List[str]:
-        # For XMP:Subject on video, exiftool may return the tag under the
-        # fully-qualified group name XMP-dc:Subject depending on version.
-        # Request both so we don't miss existing keywords.
         tags_to_read = [tag]
         if tag == 'XMP:Subject':
             tags_to_read.append('XMP-dc:Subject')
@@ -349,8 +314,6 @@ class ExifWriter:
             return []
         row = result[0]
 
-        # PyExifTool may return keys with or without group prefix depending on
-        # common_args. Try all candidate names and merge results.
         candidates = tags_to_read + [t.split(':', 1)[-1] for t in tags_to_read]
         seen: set[str] = set()
         keywords: List[str] = []
@@ -416,29 +379,17 @@ class ExifWriter:
 
     @staticmethod
     def _normalize_datetime(raw: str) -> Tuple[str, Optional[str]]:
-        """Parse a date string into (exif_datetime, offset_or_None).
-
-        exif_datetime is 'YYYY:MM:DD HH:MM:SS' (EXIF standard).
-        offset_or_None is '+HH:MM' / '-HH:MM' when the input carried a UTC
-        offset, or None when the input was naive (no zone info). The offset
-        should be written to OffsetTimeOriginal / OffsetTime so that the
-        wall-clock time and the zone are not silently separated.
-
-        Returns ('', None) when the input cannot be parsed — callers must
-        treat this as "skip the write" to avoid storing garbage.
-        """
+        """Parse a date string into (exif_datetime, offset_or_None)."""
         if not raw:
             return '', None
         s = str(raw).strip()
 
-        # Already in EXIF format with no zone — keep as-is, no offset.
         try:
             datetime.strptime(s, '%Y:%m:%d %H:%M:%S')
             return s, None
         except ValueError:
             pass
 
-        # ISO 8601 (with or without offset / Z).
         try:
             dt = datetime.fromisoformat(s.replace('Z', '+00:00'))
             exif_str = dt.strftime('%Y:%m:%d %H:%M:%S')
@@ -464,25 +415,22 @@ class ExifWriter:
 
         cur, offset = self._normalize_datetime(cur_raw)
         if cur_raw and not cur:
-            # Had a value but couldn't parse it — refuse to write garbage.
             return []
 
         if is_video:
             if cur:
-                params = [f'-QuickTime:CreateDate={cur}',
-                          f'-QuickTime:ModifyDate={cur}']
-                # QuickTime stores timezone as a UTC offset in a separate atom.
-                if offset:
-                    params.append(f'-QuickTime:OffsetTime={offset}')
-                return params
-            return ['-QuickTime:CreateDate=', '-QuickTime:ModifyDate=',
-                    '-QuickTime:OffsetTime=']
+                return [
+                    f'-QuickTime:CreateDate={cur}',
+                    f'-QuickTime:ModifyDate={cur}',
+                ]
+            return [
+                '-QuickTime:CreateDate=',
+                '-QuickTime:ModifyDate=',
+            ]
 
         if cur:
             params = [f'-EXIF:DateTimeOriginal={cur}', f'-EXIF:CreateDate={cur}']
             if offset:
-                # OffsetTimeOriginal pairs with DateTimeOriginal; OffsetTime
-                # pairs with ModifyDate/CreateDate.
                 params += [f'-EXIF:OffsetTimeOriginal={offset}',
                            f'-EXIF:OffsetTime={offset}']
             return params
