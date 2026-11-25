@@ -1,4 +1,4 @@
-# Entry point: load config, set up logging/signals, run continuous sync loop.
+# Entry point: run one independent sync cycle for each configured Immich user.
 import logging
 import os
 import signal
@@ -21,106 +21,153 @@ def setup_logging(config: Config) -> logging.Logger:
 
     fmt = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     level = getattr(logging, config.log_level.upper())
-
     file_handler = logging.FileHandler(config.log_file)
     file_handler.setLevel(level)
     file_handler.setFormatter(logging.Formatter(fmt))
-
     console = logging.StreamHandler()
     console.setLevel(level)
     console.setFormatter(logging.Formatter(fmt))
 
     root = logging.getLogger()
     root.setLevel(level)
-    for h in list(root.handlers):
-        root.removeHandler(h)
+    for handler in list(root.handlers):
+        root.removeHandler(handler)
     root.addHandler(file_handler)
     root.addHandler(console)
     return logging.getLogger(__name__)
 
 
+def _state_path_for_account(base_path: str, account_number: int) -> str:
+    # Preserve the existing state file for account 1.
+    if account_number == 1:
+        return base_path
+    root, extension = os.path.splitext(base_path)
+    return f"{root}.account-{account_number}{extension or '.json'}"
+
+
 def main():
-    logger: logging.Logger | None = None
-    client: ImmichApiClient | None = None
-    exif_writer: ExifWriter | None = None
+    logger = None
+    exif_writer = None
     stop_event = threading.Event()
 
     def _on_signal(signum, _frame):
         name = signal.Signals(signum).name
         if logger:
-            logger.info("Received %s; will stop after current asset", name)
+            logger.info("Received %s; stopping after the current asset/account", name)
         stop_event.set()
 
     try:
         config = Config()
         logger = setup_logging(config)
-
         signal.signal(signal.SIGTERM, _on_signal)
         signal.signal(signal.SIGINT, _on_signal)
 
+        api_keys = config.immich_api_keys
         logger.info("=" * 60)
         logger.info("Immich EXIF Writer starting")
         logger.info("URL: %s", config.immich_url)
         logger.info("Media path: %s", config.media_path)
         logger.info("Sync interval: %ds", config.sync_interval)
-        logger.info("API keys loaded: %d", len(config.immich_api_keys))
-        logger.info("State file: %s", config.state_file)
+        logger.info("Immich accounts configured: %d", len(api_keys))
+        logger.info("Base state file: %s", config.state_file)
         logger.info("Dry run: %s   Keep backups: %s",
                     os.environ.get('EXIF_DRY_RUN', '0'),
                     os.environ.get('EXIF_KEEP_BACKUPS', '1'))
         logger.info("=" * 60)
 
-        client = ImmichApiClient(config.immich_url, config.immich_api_keys)
         exif_writer = ExifWriter()
-        state_manager = StateManager(state_file_path=config.state_file)
-        engine = SyncEngine(client, exif_writer, state_manager,
-                            config.media_path)
-
         run_number = 0
+
         while not stop_event.is_set():
             run_number += 1
-            logger.info("-" * 50)
-            logger.info("Sync run #%d", run_number)
-            start = time.time()
-            try:
-                processed, errors = engine.run_sync(stop_event=stop_event)
-                duration = time.time() - start
-                state_manager.update_stats(
-                    total_synced_delta=processed,
-                    duration=duration,
-                    errors_delta=errors)
-                try:
-                    state_manager.save()
-                except Exception as e:
-                    logger.error("State save after sync failed: %s", e)
+            cycle_start = time.time()
+            cycle_processed = 0
+            cycle_errors = 0
+
+            logger.info("-" * 60)
+            logger.info("Starting sync cycle #%d for %d account(s)",
+                        run_number, len(api_keys))
+
+            # Each key is a separate user identity, not a failover credential.
+            for account_number, api_key in enumerate(api_keys, start=1):
+                if stop_event.is_set():
+                    break
+
+                state_path = _state_path_for_account(
+                    config.state_file, account_number
+                )
+                client = None
                 logger.info(
-                    "Run #%d complete: %d processed, %d errors, %.1fs",
-                    run_number, processed, errors, duration)
-            except Exception as e:
-                logger.error("Sync run #%d crashed: %s", run_number, e)
-                logger.error(traceback.format_exc())
+                    "Account %d/%d starting (state=%s, API key suffix=...%s)",
+                    account_number, len(api_keys), state_path, api_key[-4:],
+                )
+
+                try:
+                    # Pass exactly one key to this account's client.
+                    client = ImmichApiClient(config.immich_url, [api_key])
+                    state_manager = StateManager(state_file_path=state_path)
+                    engine = SyncEngine(
+                        client, exif_writer, state_manager, config.media_path
+                    )
+
+                    account_start = time.time()
+                    processed, errors = engine.run_sync(stop_event=stop_event)
+                    duration = time.time() - account_start
+
+                    state_manager.update_stats(
+                        total_synced_delta=processed,
+                        duration=duration,
+                        errors_delta=errors,
+                    )
+                    try:
+                        state_manager.save()
+                    except Exception as exc:
+                        logger.error("State save failed for account %d: %s",
+                                     account_number, exc)
+                        errors += 1
+
+                    cycle_processed += processed
+                    cycle_errors += errors
+                    logger.info(
+                        "Account %d/%d complete: %d processed, %d errors, %.1fs",
+                        account_number, len(api_keys), processed, errors, duration,
+                    )
+
+                except Exception as exc:
+                    cycle_errors += 1
+                    logger.error("Account %d/%d failed: %s",
+                                 account_number, len(api_keys), exc)
+                    logger.error(traceback.format_exc())
+                    # A failed account must not prevent the next account syncing.
+                finally:
+                    if client is not None:
+                        try:
+                            client.close()
+                        except Exception:
+                            logger.exception("Could not close account %d client",
+                                             account_number)
+
+            logger.info(
+                "SYNC CYCLE #%d COMPLETE: %d processed, %d errors, %.1fs",
+                run_number, cycle_processed, cycle_errors,
+                time.time() - cycle_start,
+            )
 
             if stop_event.is_set():
                 break
             next_time = datetime.now() + timedelta(seconds=config.sync_interval)
-            logger.info("Next sync at %s",
+            logger.info("Next full account cycle at %s",
                         next_time.strftime('%Y-%m-%d %H:%M:%S'))
             stop_event.wait(config.sync_interval)
 
-    except Exception as e:
+    except Exception as exc:
         if logger:
-            logger.error("Fatal error: %s", e)
+            logger.error("Fatal error: %s", exc)
             logger.error(traceback.format_exc())
         else:
-            print(f"Fatal error during startup: {e}")
+            print(f"Fatal error during startup: {exc}")
             traceback.print_exc()
-
     finally:
-        if client is not None:
-            try:
-                client.close()
-            except Exception:
-                pass
         if exif_writer is not None:
             try:
                 exif_writer.close()
