@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from exiftool import ExifToolHelper
+from exiftool.exceptions import ExifToolExecuteError
 
 
 logger = logging.getLogger(__name__)
@@ -61,7 +62,12 @@ class ExifWriter:
     # ----- lifecycle -----
     def _get_et(self) -> ExifToolHelper:
         if self._et is None:
-            self._et = ExifToolHelper(common_args=['-m'])
+            # check_execute=False: we inspect the returned stdout string ourselves
+            # via _is_failure() rather than relying on exception-based flow for
+            # non-zero exits.  ExifTool exits with status 1 on minor warnings
+            # (e.g. unknown tags suppressed by -m) even when the write succeeded,
+            # so raising unconditionally on status != 0 produces false failures.
+            self._et = ExifToolHelper(common_args=['-m'], check_execute=False)
         return self._et
 
     def close(self) -> None:
@@ -116,18 +122,38 @@ class ExifWriter:
             return True
 
         try:
-            logger.debug("ExifTool %s", params)
+            logger.debug("ExifTool params: %s", params)
             result = self._get_et().execute(*params)
-        except Exception as e:
-            logger.error("ExifTool raised on %s: %s", file_path, e)
+        except ExifToolExecuteError as e:
+            # check_execute=False means this shouldn't fire, but guard anyway.
+            # Log stdout AND stderr from the exception so the caller can see
+            # the actual ExifTool error message rather than just "exit status 1".
+            logger.error(
+                "ExifTool non-zero exit for %s — stdout: %r  stderr: %r  params: %s",
+                file_path, e.stdout, e.stderr, e.cmd,
+            )
             return False
+        except Exception as e:
+            logger.error("ExifTool unexpected error for %s: %s", file_path, e)
+            return False
+
+        # Surface stderr from the last call even on a clean return, so warnings
+        # are visible in logs without requiring DEBUG level.
+        stderr_text = getattr(self._et, 'last_stderr', '') or ''
+        if stderr_text.strip():
+            logger.warning("ExifTool stderr for %s: %s", file_path, stderr_text.strip())
 
         if self._is_failure(result):
-            logger.error("ExifTool reported failure for %s: %r", file_path, result)
+            stdout_text = getattr(self._et, 'last_stdout', result) or result
+            logger.error(
+                "ExifTool reported failure for %s — stdout: %r  stderr: %r",
+                file_path, stdout_text, stderr_text,
+            )
             return False
+
         logger.debug("EXIF updated for %s", file_path)
         return True
-
+                          
     # ----- output inspection -----
     @staticmethod
     def _is_failure(result: Optional[str]) -> bool:
@@ -141,25 +167,28 @@ class ExifWriter:
 
         lower = s.lower()
 
-        # Hard failure strings exiftool emits on write errors.
-        if "weren't updated" in lower or 'could not be' in lower:
+        # Hard failure phrases ExifTool emits on write errors.
+        if "weren't updated" in lower or 'could not be written' in lower:
             return True
 
-        # "N image files updated" — failure only if N == 0.
+        # "N image files updated" — failure only when N == 0.
+        # Check this BEFORE the generic 'error' scan so that a warning line
+        # above an "updated" line doesn't cause a false failure.
         m = re.search(r'(\d+)\s+(?:image\s+)?files?\s+updated', lower)
         if m:
             return int(m.group(1)) == 0
 
-        # "N image files unchanged" (tags already matched) — not a failure.
-        m = re.search(r'(\d+)\s+(?:image\s+)?files?\s+unchanged', lower)
-        if m:
+        # "N image files unchanged" — tags already matched, not a failure.
+        if re.search(r'\d+\s+(?:image\s+)?files?\s+unchanged', lower):
             return False
 
+        # Generic error keyword — only reached when no update/unchanged count
+        # was present (e.g. a pure error with no files processed at all).
         if 'error' in lower:
             return True
 
-        # Unknown output from a non-empty, non-error string — assume success
-        # rather than mis-reporting every write as failed.
+        # Unknown non-empty output — assume success rather than mis-reporting
+        # every write as failed.
         return False
 
     # ----- parameter building -----
