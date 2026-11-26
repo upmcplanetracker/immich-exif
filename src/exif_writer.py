@@ -51,12 +51,18 @@ PHOTO_EXTENSIONS = {
     '.rwl',
     '.iiq',
     '.gpr',
+    '.psd',
 }
 
 READ_ONLY_VIDEO_EXTENSIONS = {
     '.mkv',
     '.webm',
     '.avi',
+    '.mpg',
+    '.mpeg',
+    '.m2ts',
+    '.mts',
+    '.ts',
 }
 
 VIDEO_EXTENSIONS = {
@@ -186,6 +192,18 @@ class ExifWriter:
             'corrupt ',
         )
         return any(marker in lower for marker in markers)
+
+    @staticmethod
+    def _is_unchanged_without_error(
+        result: Optional[str], stderr_text: Optional[str]
+    ) -> bool:
+        """Return True when ExifTool reports 0 updated / unchanged with no error."""
+        if stderr_text and stderr_text.strip():
+            return False
+        if not result or not isinstance(result, str):
+            return False
+        lower = result.lower()
+        return '0 image files updated' in lower and 'unchanged' in lower
 
     def write_metadata(self, file_path: str, metadata: Dict[str, Any],
                        previous_metadata: Optional[Dict[str, Any]] = None) -> bool:
@@ -341,8 +359,16 @@ class ExifWriter:
                 )
                 ok = False
             else:
+                stderr_val = getattr(self._get_et(), '_last_stderr', None)
+                if self._is_unchanged_without_error(result, stderr_val):
+                    self.last_write_skipped_format = True
+                    logger.warning(
+                        "Skipping file left unchanged by ExifTool %s: %s",
+                        file_path,
+                        str(result).strip(),
+                    )
+                    return False
                 if self._is_failure(result):
-                    stderr_val = getattr(self._get_et(), '_last_stderr', None)
                     if self._is_format_or_structure_rejection(stderr_val):
                         self.last_write_skipped_format = True
                         logger.warning(
@@ -381,8 +407,17 @@ class ExifWriter:
                         description_file.name, list(tag_dict), file_path,
                     )
                     result = self._get_et().execute(*cli_params)
+                    stderr_val = getattr(self._get_et(), '_last_stderr', None)
+                    if self._is_unchanged_without_error(result, stderr_val):
+                        self.last_write_skipped_format = True
+                        logger.warning(
+                            "Skipping file left unchanged by ExifTool on "
+                            "description write %s: %s",
+                            file_path,
+                            str(result).strip(),
+                        )
+                        return False
                     if self._is_failure(result):
-                        stderr_val = getattr(self._get_et(), '_last_stderr', None)
                         if self._is_format_or_structure_rejection(stderr_val):
                             self.last_write_skipped_format = True
                             logger.warning(
