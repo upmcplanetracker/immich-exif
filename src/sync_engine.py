@@ -146,7 +146,7 @@ class SyncEngine:
             "Processed successfully: %d\n"
             "Skipped (unchanged): %d\n"
             "Skipped (read-only video): %d\n"
-            "Skipped (mislabeled RIFF/WebP): %d\n"
+            "Skipped (mislabeled/unwriteable): %d\n"
             "Errors: %d\n"
             "Interrupted: %s\n"
             "Duration: %.1f seconds",
@@ -234,18 +234,12 @@ class SyncEngine:
             )
             return ProcessResult.ERROR
 
-        # Some containers (MKV/WebM/AVI) are intentionally read-only for this
-        # ExifTool build. Mark them handled in state so unchanged assets are not
-        # reconsidered on every incremental run, but report them as skipped.
         if self.exif_writer.is_read_only_video(file_path):
             logger.info("Metadata write skipped (read-only video): %s", file_path)
             if not self.exif_writer.dry_run:
                 self.state_manager.set_asset_metadata(asset_id, metadata)
             return ProcessResult.READ_ONLY_VIDEO
 
-        # Non-.webp files with RIFF/WebP headers are rejected by ExifTool when
-        # written with image-format tags. Record state outside dry-run so we
-        # log once and do not retry unchanged files every cycle.
         if self.exif_writer.is_mislabeled_webp(file_path):
             logger.warning(
                 "Metadata write skipped (RIFF/WebP file mislabeled as %s): %s",
@@ -258,11 +252,13 @@ class SyncEngine:
 
         previous = self.state_manager.get_asset_metadata(asset_id)
         if not self.exif_writer.write_metadata(file_path, metadata, previous):
+            if getattr(self.exif_writer, "last_write_skipped_format", False):
+                if not self.exif_writer.dry_run:
+                    self.state_manager.set_asset_metadata(asset_id, metadata)
+                return ProcessResult.SKIPPED_MISLABELED
             logger.error("EXIF write failed for %s", file_path)
             return ProcessResult.ERROR
 
-        # A dry-run returns success to mean "would write", but must not mark
-        # the asset as synchronized. The next real run must still process it.
         if not self.exif_writer.dry_run:
             self.state_manager.set_asset_metadata(asset_id, metadata)
 
@@ -300,7 +296,6 @@ class SyncEngine:
 
         normalized = os.path.normpath(str(original_path).replace("\\", "/"))
 
-        # 1. Translate via explicit PATH_MAPPINGS if a prefix matches.
         for src_prefix, dst_root in self.path_mappings:
             prefix_slash = src_prefix.rstrip("/") + "/"
             if normalized == src_prefix:
@@ -320,7 +315,6 @@ class SyncEngine:
                 return None
             return candidate
 
-        # 2. Direct path resolution when container mounts mirror Immich's paths.
         if not os.path.isabs(normalized):
             logger.warning(
                 "Relative originalPath %r has no matching PATH_MAPPINGS entry",
