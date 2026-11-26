@@ -135,7 +135,7 @@ All configuration is via environment variables (or a `.env` file next to the pro
 | `PATH_MAPPINGS` | No | — | Optional comma- or newline-separated `immich_prefix=local_prefix` pairs to translate `immich-server` container paths to paths in this container (e.g. `/usr/src/app/upload=/data/upload`). Not needed if mount paths match `immich-server`. |
 | `SYNC_INTERVAL` | No | `900` | Seconds between sync cycles. `900` = 15 minutes. |
 | `LOG_LEVEL` | No | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL`. |
-| `LOG_FILE` | No | `/app/logs/exif-writer.log` | Log file path. |
+| `LOG_FILE` | No | `/app/logs/exif-writer.log` | Log file path. Logs grow forever if enabled. Delete as needed. |
 | `STATE_FILE` | No | `/app/state/sync_state.json` | Base path where sync state is persisted. Additional accounts use `<name>.account-2.json`, `<name>.account-3.json`, etc. |
 | `EXIF_DRY_RUN` | No | `0` | If `1`, log intended writes and modify nothing. The sync-state file is also left unchanged, so a later real run will still process the assets. |
 | `EXIF_KEEP_BACKUPS` | No | `1` | If `1`, ExifTool saves `<file>_original` before editing. Set `0` only after you trust the tool. |
