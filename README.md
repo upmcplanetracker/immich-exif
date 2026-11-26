@@ -2,7 +2,7 @@ This was forked from another repo https://github.com/jmathai/immich-exif and I v
 immich-exif
 ===========
 
-Writes metadata from your [Immich](https://immich.app) library (albums, favorite status, description, GPS coordinates, capture date) into the EXIF / XMP tags of the underlying image and video files.
+Writes metadata from your [Immich](https://immich.app) library (albums, favorite status, description, GPS coordinates, capture date) into the EXIF / XMP / QuickTime tags of the underlying image and video files.
 
 **Why this exists:** Immich stores metadata in its database, not in the files. When you add a photo to an album in Immich, the `.jpg` on disk is unchanged — so external tools (Lightroom, digiKam, PhotoPrism, plain `exiftool`) don't see your albums, ratings, or descriptions. This service bridges that gap by reading from the Immich API and writing to the files via ExifTool.
 
@@ -19,10 +19,10 @@ Used to retrieve metadata associated with assets, including:
 
 The Immich API is used for **reading metadata only**. This project does not modify assets through the Immich API.
 
-### Filesystem (`MEDIA_PATH`)
-Provides direct access to the original media files, including `.jpg`, `.jpeg`, and `.mp4` files.
+### Filesystem (Upload & External Libraries)
+Provides direct access to the original media files on disk across both Immich-managed uploads and **External Libraries**.
 
-ExifTool is used to write metadata directly into the media files themselves. This requires the container to have **read/write access** to the Immich library mounted at `MEDIA_PATH`.
+ExifTool is used to write metadata directly into the media files in place. This requires the container to have **read/write access** to every volume containing assets you want updated.
 
 The API provides the metadata; the filesystem provides the actual files to modify.
 
@@ -30,21 +30,23 @@ Features
 --------
 
 *   Incremental sync — only touches assets that changed in Immich
-*   Multiple API keys with automatic rotation on 401/403/429
+*   **Multi-user / multi-account support** — runs an independent sync cycle with isolated state files for each configured API key
+*   **Native support for both Upload and External Libraries** — works out of the box when container mount paths mirror `immich-server`, or translates custom mount layouts via `PATH_MAPPINGS`
 *   Per-file diff — only writes tags that actually changed
 *   **Non-destructive keyword handling** — only removes keywords it wrote itself (verified against state); user-added keywords are never touched
 *   Correct GPS hemisphere handling (`abs` + explicit `N/S/E/W` ref)
 *   ISO 8601 → EXIF date conversion (refuses to write garbage)
+*   JPEG-in-HEIC detection — safely stages `.jpg` writes and atomically preserves the original filename when a JPEG file has a `.heic`/`.heif`/`.hif` extension
 *   Dry-run and backup modes for safe first runs
 *   Atomic state writes; corrupt state is quarantined, not silently discarded
-*   Graceful shutdown on SIGTERM (SIGKILL-proof via `tini`)
+*   Graceful shutdown on SIGTERM/SIGINT (SIGKILL-proof via `tini`)
 *   One persistent ExifTool subprocess for the whole sync (fast)
 
 Requirements
 ------------
 
-*   A running Immich instance and an API key from **User Settings → API Keys**
-*   The Immich upload directory bind-mounted into the container (read/write)
+*   A running Immich instance and one or more API keys from **User Settings → API Keys**
+*   The Immich upload directory and any External Library directories bind-mounted into the container (read/write)
 *   ExifTool ≥ 12.57 (tested through 13.55)
 
 Quick start
@@ -59,11 +61,18 @@ Minimum required:
 
     IMMICH_URL=http://immich-server:2283
     IMMICH_API_KEYS=your-api-key-here
-    MEDIA_PATH=/mnt/media
 
-`MEDIA_PATH` must be **the path inside this container**, not inside the `immich-server` container. The most common misconfiguration is copying `/usr/src/app/upload` from Immich's container — that path doesn't exist here.
+By default, `immich-exif` resolves the `originalPath` reported by Immich directly on disk. Mounting your volumes at the **exact same container paths** used by `immich-server` (for example, `/usr/src/app/upload` and `/usr/src/app/external/...`) requires zero path configuration.
 
-### 2\. docker-compose.yml
+If your `immich-exif` container mounts those directories at different paths, map them with `PATH_MAPPINGS`:
+
+    PATH_MAPPINGS=/usr/src/app/upload=/data/upload,/usr/src/app/external/photos=/data/external/photos
+
+### 2\. Container volume setup
+
+#### Option A: Mirror `immich-server` paths (recommended — zero path config)
+
+**`docker-compose.yml` example:**
 
     services:
       immich-exif:
@@ -72,11 +81,25 @@ Minimum required:
         restart: unless-stopped
         env_file: .env
         volumes:
-          # Same host path that Immich's UPLOAD_LOCATION points to.
-          # Left side = host path; right side = MEDIA_PATH in .env.
-          - /path/to/immich/upload:/mnt/media
+          - /path/to/immich/upload:/usr/src/app/upload:rw
+          - /path/to/external/photos:/usr/src/app/external/photos:rw
+          - /path/to/external/videos:/usr/src/app/external/videos:rw
           - ./state:/app/state
           - ./logs:/app/logs
+
+**Podman Quadlet (`.container`) example:**
+
+    Volume=%h/Pictures:/usr/src/app/upload:rw
+    Volume=/mnt/external_pictures:/usr/src/app/external/external_pictures:rw
+    Volume=/mnt/external_videos:/usr/src/app/external/external_videos:rw
+
+*(Never mount multiple different host volumes to the same container target path; give each volume its own non-overlapping path.)*
+
+#### Option B: Custom container paths with `PATH_MAPPINGS`
+
+If your container mounts volumes under custom paths (e.g., `/mnt/upload` and `/mnt/external_photos`), set `PATH_MAPPINGS` in `.env` or your container environment:
+
+    PATH_MAPPINGS=/usr/src/app/upload=/mnt/upload,/usr/src/app/external/photos=/mnt/external_photos
 
 ### 3\. Build and run — safely
 
@@ -105,35 +128,35 @@ All configuration is via environment variables (or a `.env` file next to the pro
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `IMMICH_URL` | **Yes** | — | Immich base URL, e.g. `http://immich-server:2283`. Must start with `http://` or `https://`. |
-| `IMMICH_API_KEYS` | **Yes†** | — | Multiple Immich API keys, comma-separated on a single line. Each key is associated with a user account. The application processes assets for each account using its corresponding API key. |
+| `IMMICH_API_KEYS` | **Yes†** | — | Comma-separated list of Immich API keys (one per user account). Each key runs an independent sync cycle with its own state file. |
 | `IMMICH_API_KEY` | **Yes†** | — | Single API key fallback for installations using one Immich account. Used only if `IMMICH_API_KEYS` is not set. |
-| `MEDIA_PATH` | **Yes** | — | Path to the Immich library **as mounted in this container**. Must exist and be readable/writable. |
-| `SYNC_INTERVAL` | No | `900` | Seconds between sync runs. `900` = 15 minutes. |
+| `PATH_MAPPINGS` | No | — | Optional comma- or newline-separated `immich_prefix=local_prefix` pairs to translate `immich-server` container paths to paths in this container (e.g. `/usr/src/app/upload=/data/upload`). Not needed if mount paths match `immich-server`. |
+| `SYNC_INTERVAL` | No | `900` | Seconds between sync cycles. `900` = 15 minutes. |
 | `LOG_LEVEL` | No | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL`. |
 | `LOG_FILE` | No | `/app/logs/exif-writer.log` | Log file path. |
-| `STATE_FILE` | No | `/app/state/sync_state.json` | Where sync state is persisted. |
+| `STATE_FILE` | No | `/app/state/sync_state.json` | Base path where sync state is persisted. Additional accounts use `<name>.account-2.json`, `<name>.account-3.json`, etc. |
 | `EXIF_DRY_RUN` | No | `0` | If `1`, log intended writes and modify nothing. The sync-state file is also left unchanged, so a later real run will still process the assets. |
 | `EXIF_KEEP_BACKUPS` | No | `1` | If `1`, ExifTool saves `<file>_original` before editing. Set `0` only after you trust the tool. |
 
-† At least one of `IMMICH_API_KEYS` or `IMMICH_API_KEY` is required. `IMMICH_API_KEYS` supports multiple user accounts. If both are configured, `IMMICH_API_KEYS` takes precedence.
+† At least one of `IMMICH_API_KEYS` or `IMMICH_API_KEY` is required. If both are configured, `IMMICH_API_KEYS` takes precedence.
 
-Startup fails fast with a clear `ValueError` if any required variable is missing, if a key is still the placeholder `YOUR_API_KEY_HERE`, if `SYNC_INTERVAL` isn't a positive integer, or if `LOG_LEVEL` isn't a known level.
+Startup fails fast with a clear `ValueError` if any required variable is missing, if a key is still the placeholder `YOUR_API_KEY_HERE`, if `PATH_MAPPINGS` contains a malformed `src=dst` entry, if `SYNC_INTERVAL` isn't a positive integer, or if `LOG_LEVEL` isn't a known level.
 
-Multiple API keys
------------------
+Multiple API keys (Multi-User Sync)
+-----------------------------------
 
-The client accepts a comma-separated list of keys and rotates through them:
+Provide one API key per Immich user account as a comma-separated list:
 
-    IMMICH_API_KEYS=key1,key2,key3
+    IMMICH_API_KEYS=key_user1,key_user2
 
 Behavior:
 
-*   **401 / 403** (auth failed) → key marked dead permanently, next key used, logged at `WARNING` with the last 4 chars only.
-*   **429** (rate-limited) → next key used immediately; if a `Retry-After` header is present, honors it.
-*   **5xx / connection errors** → retries the same key with exponential backoff and jitter (up to 3 attempts). If all attempts fail, next key used.
-*   **If all keys are dead** → `ImmichAuthError` raised; sync cycle aborts, process continues running and retries next interval.
+*   **Independent account sync:** Each API key represents a distinct Immich user identity. On every cycle, `immich-exif` runs a full incremental sync for each configured account in sequence so both user libraries and external libraries are updated.
+*   **Per-account state isolation:** Account 1 uses `STATE_FILE` (default `/app/state/sync_state.json`), while subsequent accounts automatically write to `sync_state.account-2.json`, `sync_state.account-3.json`, and so on.
+*   **Fault isolation:** If one account encounters an error, it is logged and skipped so remaining accounts still sync normally.
+*   **Transient retries:** `5xx` and connection errors retry with exponential backoff and jitter.
 
-Thread-safe. Whitespace around keys is trimmed. Newlines in the env var are also accepted as separators, but prefer single-line comma-separated to keep docker-compose `env_file:` parsing identical.
+Whitespace around keys is trimmed. Newlines in the env var are also accepted as separators, though single-line comma-separated values work best with `env_file:` parsers.
 
 Safety features
 ---------------
@@ -168,18 +191,17 @@ The old version of this tool removed **all** existing keywords before writing al
 *   Adds any new albums as keywords
 *   Keywords you added manually via Lightroom, digiKam, etc. are **never** removed
 
-### State schema migration
+### Read-only video containers
 
-The state file has a `version` field. Schema v3 clears the cached asset metadata
-and resets the last-sync timestamp when upgrading from v1 or v2. This is
-intentional: older dry-runs could have marked assets as synchronized without
-writing their files. The next real run therefore rechecks the full library.
-Expect one longer sync after this upgrade.
+Matroska (`.mkv`), WebM (`.webm`), and AVI (`.avi`) files are skipped cleanly for tag writes and recorded in state as handled so they do not generate repeated warnings on subsequent incremental runs.
+
+### State schema & error handling
 
 The sync engine does not prune cached assets from an incremental search because
 that search is not a complete inventory of the library. It also does not
 advance the sync timestamp when a run is interrupted or any asset fails; those
 assets are retried on the next cycle.
+
 If Immich returns an error while reading any album, the album-map scan aborts
 the sync instead of continuing with incomplete data. This prevents a temporary
 API failure from being mistaken for albums being removed.
@@ -195,12 +217,12 @@ For a photo:
              -GPSLatitude -GPSLatitudeRef \
              -GPSLongitude -GPSLongitudeRef \
              -DateTimeOriginal \
-             /mnt/media/library/.../photo.jpg
+             /path/to/photo.jpg
 
 For a video:
 
     exiftool -Subject -Rating -Description -CreateDate \
-             /mnt/media/library/.../video.mp4
+             /path/to/video.mp4
 
 To see exactly what changed vs the backup:
 
@@ -209,18 +231,17 @@ To see exactly what changed vs the backup:
 Troubleshooting
 ---------------
 
-### Every asset logs "File missing"
+### Assets log "File missing"
 
-`MEDIA_PATH` is wrong. Two common mistakes:
+The `WARNING` log line shows both `originalPath` (the path inside `immich-server`) and `resolved` (the path checked inside `immich-exif`). Compare them to diagnose:
 
-1.  **Copied from Immich's container** — `/usr/src/app/upload` is Immich's internal path. Your container needs the path where the volume is mounted _here_, usually `/mnt/media` or similar.
-2.  **Missing volume mount** — the compose file needs a line like `- /host/path:/mnt/media` matching your `MEDIA_PATH`.
+1.  **Missing volume mount** — Make sure every upload and external library volume mounted into `immich-server` is also mounted read/write into `immich-exif`.
+2.  **Mismatched container paths** — Either update your `immich-exif` volume mount target so it matches `originalPath` directly, or add a `PATH_MAPPINGS` rule translating the `immich-server` prefix to your `immich-exif` mount path.
+3.  **Colliding mounts** — Ensure you haven't mounted two host directories onto the same target directory in your compose or Quadlet file.
 
-The `WARNING` log line shows both `originalPath` (what Immich reported) and `tried` (the path we computed). Compare them to diagnose.
+### `401` / `403` authentication errors
 
-### `All configured Immich API keys were rejected`
-
-Either the keys are wrong/expired, or they belong to a user without library access. Regenerate in Immich and update `.env`.
+Either an API key is wrong/expired, or it belongs to a user without access to those assets. Regenerate the user's API key in Immich (**User Settings → API Keys**) and update `IMMICH_API_KEYS`.
 
 ### Videos not getting keywords
 
@@ -232,7 +253,7 @@ Check the diff against the backup. If keywords were removed, they must have matc
 
 ### Logs show `[DRY RUN]` but you didn't set `EXIF_DRY_RUN`
 
-Check that `EXIF_DRY_RUN=1` isn't set in your shell environment, your `docker-compose.yml` `environment:` block, or inherited from the parent process. `printenv | grep EXIF` shows what's in the current shell.
+Check that `EXIF_DRY_RUN=1` isn't set in your shell environment, your `docker-compose.yml` `environment:` block, your systemd Quadlet unit, or inherited from the parent process. `printenv | grep EXIF` shows what's in the current shell.
 
 ### Container takes a long time to shut down
 
