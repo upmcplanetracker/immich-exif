@@ -10,6 +10,8 @@
 #   * JPEG data stored under a HEIC-family extension is staged as a .jpg
 #     during metadata writes, then atomically put back under its original name.
 #   * Non-.webp files containing RIFF/WebP data are skipped with a warning.
+#   * Format mismatches or corrupt file headers rejected by ExifTool are
+#     reported as skipped-unwriteable so they do not stall sync progress.
 import logging
 import os
 import shutil
@@ -84,6 +86,7 @@ class ExifWriter:
         self._keep_backups = (_env_bool('EXIF_KEEP_BACKUPS', True)
                               if keep_backups is None else keep_backups)
         self._et: Optional[ExifToolHelper] = None
+        self.last_write_skipped_format: bool = False
         if self._dry_run:
             logger.warning(
                 "ExifWriter running in DRY-RUN mode — no files will be modified.")
@@ -167,8 +170,27 @@ class ExifWriter:
             and self._is_jpeg_content(file_path)
         )
 
+    @staticmethod
+    def _is_format_or_structure_rejection(stderr_text: Optional[str]) -> bool:
+        """Detect ExifTool errors caused by mislabeled formats or corrupt headers."""
+        if not stderr_text:
+            return False
+        lower = stderr_text.lower()
+        markers = (
+            'not a valid ',
+            'looks more like a ',
+            'bad format ',
+            'format error in file',
+            'error reading file',
+            'unknown file type',
+            'corrupt ',
+        )
+        return any(marker in lower for marker in markers)
+
     def write_metadata(self, file_path: str, metadata: Dict[str, Any],
                        previous_metadata: Optional[Dict[str, Any]] = None) -> bool:
+        self.last_write_skipped_format = False
+
         if not self.is_supported_file(file_path):
             logger.warning("Unsupported file type: %s", file_path)
             return False
@@ -211,10 +233,6 @@ class ExifWriter:
                 )
             return True
 
-        # ExifTool uses the filename extension when deciding how to write some
-        # formats. A JPEG with a .heic/.heif/.hif name is therefore rejected.
-        # Stage a same-directory .jpg copy, write that copy, then atomically
-        # replace the original file contents without changing its pathname.
         if self._needs_jpeg_extension_override(file_path):
             return self._write_jpeg_with_extension_override(
                 file_path, params, tag_dict
@@ -239,7 +257,6 @@ class ExifWriter:
             )
             os.close(fd)
 
-            # copy2 preserves timestamps and mode as well as file contents.
             shutil.copy2(file_path, temp_path)
 
             logger.info(
@@ -248,15 +265,14 @@ class ExifWriter:
                 file_path, temp_path,
             )
 
-            # The temporary working copy is disposable. Disable ExifTool's
-            # own backup on it; the original-path backup is made below instead.
             if not self._perform_write_passes(
                 temp_path, params, tag_dict, force_overwrite=True
             ):
-                logger.error(
-                    "Staged JPEG metadata write failed; original left untouched: %s",
-                    file_path,
-                )
+                if not self.last_write_skipped_format:
+                    logger.error(
+                        "Staged JPEG metadata write failed; original left untouched: %s",
+                        file_path,
+                    )
                 return False
 
             if self._keep_backups:
@@ -264,7 +280,6 @@ class ExifWriter:
                 shutil.copy2(file_path, backup_path)
                 logger.info("Original file backup created: %s", backup_path)
 
-            # temp_path is in the same directory, so replace is atomic.
             os.replace(temp_path, file_path)
             temp_path = None
             logger.info(
@@ -309,6 +324,15 @@ class ExifWriter:
                 logger.debug("ExifTool execute %s", cli_params)
                 result = self._get_et().execute(*cli_params)
             except Exception as e:
+                stderr_val = self._extract_stderr(e)
+                if self._is_format_or_structure_rejection(stderr_val):
+                    self.last_write_skipped_format = True
+                    logger.warning(
+                        "Skipping unwriteable/mislabeled file %s: %s",
+                        file_path,
+                        stderr_val.strip(),
+                    )
+                    return False
                 self._log_execute_exception(
                     operation="metadata write",
                     file_path=file_path,
@@ -318,11 +342,20 @@ class ExifWriter:
                 ok = False
             else:
                 if self._is_failure(result):
+                    stderr_val = getattr(self._get_et(), '_last_stderr', None)
+                    if self._is_format_or_structure_rejection(stderr_val):
+                        self.last_write_skipped_format = True
+                        logger.warning(
+                            "Skipping unwriteable/mislabeled file %s: %s",
+                            file_path,
+                            str(stderr_val).strip(),
+                        )
+                        return False
                     logger.error(
                         "ExifTool reported failure for %s — stdout: %r stderr: %r",
                         file_path,
                         result if isinstance(result, str) else None,
-                        getattr(self._get_et(), '_last_stderr', None),
+                        stderr_val,
                     )
                     ok = False
 
@@ -349,14 +382,34 @@ class ExifWriter:
                     )
                     result = self._get_et().execute(*cli_params)
                     if self._is_failure(result):
+                        stderr_val = getattr(self._get_et(), '_last_stderr', None)
+                        if self._is_format_or_structure_rejection(stderr_val):
+                            self.last_write_skipped_format = True
+                            logger.warning(
+                                "Skipping unwriteable/mislabeled file on description "
+                                "write %s: %s",
+                                file_path,
+                                str(stderr_val).strip(),
+                            )
+                            return False
                         logger.error(
                             "ExifTool description write failed for %s — "
                             "stdout: %r stderr: %r",
                             file_path, result,
-                            getattr(self._get_et(), '_last_stderr', None),
+                            stderr_val,
                         )
                         ok = False
             except Exception as e:
+                stderr_val = self._extract_stderr(e)
+                if self._is_format_or_structure_rejection(stderr_val):
+                    self.last_write_skipped_format = True
+                    logger.warning(
+                        "Skipping unwriteable/mislabeled file on description "
+                        "write %s: %s",
+                        file_path,
+                        stderr_val.strip(),
+                    )
+                    return False
                 self._log_execute_exception(
                     operation="description write",
                     file_path=file_path,
@@ -369,6 +422,14 @@ class ExifWriter:
         if ok:
             logger.debug("EXIF updated for %s", file_path)
         return ok
+
+    def _extract_stderr(self, exception: Exception) -> Optional[str]:
+        stderr = getattr(exception, 'stderr', None)
+        if stderr is None and self._et is not None:
+            stderr = getattr(self._et, '_last_stderr', None)
+        if stderr is None:
+            return None
+        return str(stderr)
 
     # ----- ExifTool exception diagnostics -----
     def _log_execute_exception(
