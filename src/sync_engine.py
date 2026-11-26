@@ -29,7 +29,7 @@ class SyncEngine:
         client: ImmichApiClient,
         exif_writer: ExifWriter,
         state_manager: StateManager,
-        media_path: str,
+        path_mappings: Optional[List[Tuple[str, str]]] = None,
     ):
         self.client = client
         self.exif_writer = exif_writer
@@ -37,7 +37,14 @@ class SyncEngine:
         # Keep the persistence layer aligned with the writer even when tests
         # or callers pass an explicit dry_run constructor argument.
         self.state_manager.dry_run = self.exif_writer.dry_run
-        self.media_path = os.path.abspath(media_path)
+        self.path_mappings: List[Tuple[str, str]] = sorted(
+            [
+                (os.path.normpath(src.replace("\\", "/")), os.path.abspath(dst))
+                for src, dst in (path_mappings or [])
+            ],
+            key=lambda pair: len(pair[0]),
+            reverse=True,
+        )
 
     def run_sync(
         self, stop_event: Optional[threading.Event] = None
@@ -50,8 +57,10 @@ class SyncEngine:
         """
         dry_run = self.exif_writer.dry_run
         run_started = time.monotonic()
-        sync_started_at = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace(
-            "+00:00", "Z"
+        sync_started_at = (
+            datetime.now(timezone.utc)
+            .isoformat(timespec="milliseconds")
+            .replace("+00:00", "Z")
         )
 
         last_sync = self.state_manager.get_last_sync_time()
@@ -230,7 +239,6 @@ class SyncEngine:
                 self.state_manager.set_asset_metadata(asset_id, metadata)
             return ProcessResult.READ_ONLY_VIDEO
 
-
         previous = self.state_manager.get_asset_metadata(asset_id)
         if not self.exif_writer.write_metadata(file_path, metadata, previous):
             logger.error("EXIF write failed for %s", file_path)
@@ -259,48 +267,48 @@ class SyncEngine:
             "original_path": asset.get("originalPath") or "",
         }
 
+    @staticmethod
+    def _is_within_root(root_dir: str, candidate_path: str) -> bool:
+        root_real = os.path.realpath(root_dir)
+        cand_real = os.path.realpath(candidate_path)
+        try:
+            return os.path.commonpath((root_real, cand_real)) == root_real
+        except ValueError:
+            return False
+
     def _get_file_path(self, original_path: str) -> Optional[str]:
-        """Map Immich's API path into MEDIA_PATH without allowing path escape."""
+        """Resolve Immich's originalPath to a local file path safely."""
         if not original_path:
             return None
 
-        media_root = os.path.realpath(self.media_path)
-        original = str(original_path).replace("\\", "/")
-        normalized = os.path.normpath(original)
+        normalized = os.path.normpath(str(original_path).replace("\\", "/"))
 
-        prefixes = (
-            "/usr/src/app/upload/",
-            "upload/",
-        )
-        relative: Optional[str] = None
-        for prefix in prefixes:
-            if normalized.startswith(prefix):
-                relative = normalized[len(prefix):]
-                break
-
-        if relative is None:
-            if os.path.isabs(normalized):
-                # Already resolved inside the mounted media directory.
-                absolute_original = os.path.realpath(normalized)
-                try:
-                    if os.path.commonpath((media_root, absolute_original)) == media_root:
-                        return absolute_original
-                except ValueError:
-                    pass
-                # Some Immich versions return an absolute path from inside
-                # the container. Preserve the prior best-effort behavior by
-                # interpreting an unknown absolute path relative to MEDIA_PATH.
-                relative = normalized.lstrip("/")
+        # 1. Translate via explicit PATH_MAPPINGS if a prefix matches.
+        for src_prefix, dst_root in self.path_mappings:
+            prefix_slash = src_prefix.rstrip("/") + "/"
+            if normalized == src_prefix:
+                relative = ""
+            elif normalized.startswith(prefix_slash):
+                relative = normalized[len(prefix_slash) :]
             else:
-                relative = normalized
+                continue
 
-        candidate = os.path.realpath(os.path.join(media_root, relative))
-        try:
-            if os.path.commonpath((media_root, candidate)) != media_root:
-                logger.error("Refusing path outside MEDIA_PATH: %r", original_path)
+            candidate = os.path.realpath(os.path.join(dst_root, relative))
+            if not self._is_within_root(dst_root, candidate):
+                logger.error(
+                    "Refusing path outside mapped root %s: %r",
+                    dst_root,
+                    original_path,
+                )
                 return None
-        except ValueError:
-            logger.error("Refusing invalid media path: %r", original_path)
+            return candidate
+
+        # 2. Direct path resolution when container mounts mirror Immich's paths.
+        if not os.path.isabs(normalized):
+            logger.warning(
+                "Relative originalPath %r has no matching PATH_MAPPINGS entry",
+                original_path,
+            )
             return None
 
-        return candidate
+        return os.path.realpath(normalized)
