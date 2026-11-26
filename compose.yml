@@ -19,6 +19,7 @@ services:
       LOG_FILE: /app/logs/exif-writer.log
       LOG_LEVEL: "info"
       STATE_FILE: /app/state/sync_state.json
+      LOG_TO_FILE: "1"
 
     volumes:
       - ${HOME}/immich-exif/logs:/app/logs
