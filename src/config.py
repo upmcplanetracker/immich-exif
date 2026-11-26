@@ -1,15 +1,41 @@
 # Configuration loaded entirely from environment variables (or .env).
 # Resolution order:
 #   real environment > .env file > built-in defaults
-# Required: IMMICH_URL, MEDIA_PATH, and one of IMMICH_API_KEYS / IMMICH_API_KEY.
+# Required: IMMICH_URL and one of IMMICH_API_KEYS / IMMICH_API_KEY.
+# Optional: PATH_MAPPINGS (comma/newline-separated 'immich_prefix=local_prefix' pairs).
 import os
 import re
-from typing import Dict, Any, List
+from typing import Any, Dict, List, Tuple
 
 
 def _parse_keys(raw: str) -> List[str]:
     """Split a comma/newline-separated string into a list of keys."""
     return [k.strip() for k in re.split(r'[,\n]', raw or '') if k.strip()]
+
+
+def _parse_path_mappings(raw: str) -> List[Tuple[str, str]]:
+    """Parse 'immich_prefix=local_prefix' pairs separated by commas or newlines."""
+    mappings: List[Tuple[str, str]] = []
+    for entry in re.split(r'[,\n]', raw or ''):
+        entry = entry.strip()
+        if not entry:
+            continue
+        if '=' not in entry:
+            raise ValueError(
+                f"Invalid PATH_MAPPINGS entry {entry!r}; expected 'immich_prefix=local_prefix'"
+            )
+        src, dst = entry.split('=', 1)
+        src_clean = os.path.normpath(src.strip().replace('\\', '/'))
+        dst_clean = dst.strip()
+        if not src_clean or src_clean == '.' or not dst_clean:
+            raise ValueError(
+                f"Invalid PATH_MAPPINGS entry {entry!r}; both source and destination are required"
+            )
+        mappings.append((src_clean, os.path.abspath(dst_clean)))
+
+    # Match the longest (most specific) prefix first.
+    mappings.sort(key=lambda pair: len(pair[0]), reverse=True)
+    return mappings
 
 
 class Config:
@@ -38,7 +64,9 @@ class Config:
                 'api_keys': self._resolve_keys(),
             },
             'paths': {
-                'media_path': (os.environ.get('MEDIA_PATH') or '').strip(),
+                'path_mappings': _parse_path_mappings(
+                    os.environ.get('PATH_MAPPINGS') or ''
+                ),
             },
             'sync': {
                 'interval': self._int_env('SYNC_INTERVAL', 900),
@@ -76,16 +104,16 @@ class Config:
             raise ValueError("IMMICH_URL is required")
         if not immich['url'].startswith(('http://', 'https://')):
             raise ValueError(
-                f"IMMICH_URL must start with http:// or https://, got {immich['url']!r}")
+                f"IMMICH_URL must start with http:// or https://, got {immich['url']!r}"
+            )
         if not immich['api_keys']:
             raise ValueError(
                 "No Immich API key configured. Set IMMICH_API_KEYS=key1,key2 "
-                "(or IMMICH_API_KEY=key1).")
+                "(or IMMICH_API_KEY=key1)."
+            )
         for k in immich['api_keys']:
             if k.startswith('YOUR_') and k.endswith('_HERE'):
                 raise ValueError("API key is still a placeholder")
-        if not self._config['paths']['media_path']:
-            raise ValueError("MEDIA_PATH is required")
         if self._config['sync']['interval'] <= 0:
             raise ValueError("SYNC_INTERVAL must be positive")
         if self._config['logging']['level'] not in {
@@ -93,7 +121,8 @@ class Config:
         }:
             raise ValueError(
                 f"LOG_LEVEL must be DEBUG/INFO/WARNING/ERROR/CRITICAL, "
-                f"got {self._config['logging']['level']!r}")
+                f"got {self._config['logging']['level']!r}"
+            )
 
     # ----- accessors -----
     @property
@@ -105,8 +134,8 @@ class Config:
         return list(self._config['immich']['api_keys'])
 
     @property
-    def media_path(self) -> str:
-        return self._config['paths']['media_path']
+    def path_mappings(self) -> List[Tuple[str, str]]:
+        return list(self._config['paths']['path_mappings'])
 
     @property
     def sync_interval(self) -> int:
