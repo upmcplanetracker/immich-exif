@@ -50,7 +50,7 @@ Features
 Requirements
 ------------
 
-*   A running Immich instance and one or more API keys from **User Settings → API Keys**
+*   A running Immich instance and one or more API keys from **User Settings → API Keys**.  Note: you probably just need `asset.read` and `album.read` permissions for the API key.  Open an issue if you find errors. If you are able to test out different permissions and find a different minimum need, please tell me.  TBH I haven't tested this.
 *   The Immich upload directory and any External Library directories bind-mounted into the container (read/write)
 *   ExifTool ≥ 12.57 (tested through 13.68)
 
