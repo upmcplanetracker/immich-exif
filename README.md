@@ -3,6 +3,7 @@ immich-exif
 AI Disclosure -
 This was forked from another repo that seems like it isn't being developed anymore and had some issues that I wanted to fix (https://github.com/jmathai/immich-exif) and I vibe coded the crap out of it to squash bugs, add .envs and multiple api support, change how it logs errors, etc. etc.
 
+I've run this lots of my setup but consider a backup before running this just in case. 
 
 Writes metadata from your [Immich](https://immich.app) library (albums, favorite status, description, GPS coordinates, capture date) into the EXIF / XMP / QuickTime tags of the underlying image and video files.
 
