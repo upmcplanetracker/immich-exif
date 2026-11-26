@@ -9,6 +9,7 @@
 #   * Dates: ISO 8601 is normalized to EXIF 'YYYY:MM:DD HH:MM:SS'.
 #   * JPEG data stored under a HEIC-family extension is staged as a .jpg
 #     during metadata writes, then atomically put back under its original name.
+#   * Non-.webp files containing RIFF/WebP data are skipped with a warning.
 import logging
 import os
 import shutil
@@ -131,6 +132,24 @@ class ExifWriter:
         return os.path.splitext(file_path.lower())[1] in READ_ONLY_VIDEO_EXTENSIONS
 
     @staticmethod
+    def is_mislabeled_webp(file_path: str) -> bool:
+        """Return True if a non-.webp file actually contains a RIFF/WebP container."""
+        ext = os.path.splitext(file_path.lower())[1]
+        if ext == '.webp':
+            return False
+        try:
+            with open(file_path, 'rb') as f:
+                header = f.read(12)
+            return (
+                len(header) >= 12
+                and header[:4] == b'RIFF'
+                and header[8:12] == b'WEBP'
+            )
+        except OSError as e:
+            logger.warning("Could not inspect file header for %s: %s", file_path, e)
+            return False
+
+    @staticmethod
     def _is_jpeg_content(file_path: str) -> bool:
         """Identify JPEG data by its file signature, independent of extension."""
         try:
@@ -157,6 +176,14 @@ class ExifWriter:
         if self.is_read_only_video(file_path):
             logger.info(
                 "Metadata write skipped (read-only video container): %s",
+                file_path,
+            )
+            return True
+
+        if self.is_mislabeled_webp(file_path):
+            logger.warning(
+                "Metadata write skipped (RIFF/WebP file mislabeled as %s): %s",
+                os.path.splitext(file_path)[1] or "<no ext>",
                 file_path,
             )
             return True
