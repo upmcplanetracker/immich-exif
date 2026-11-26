@@ -1,4 +1,3 @@
-# Entry point: run one independent sync cycle for each configured Immich user.
 import logging
 import os
 import signal
