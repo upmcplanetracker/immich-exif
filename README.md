@@ -139,6 +139,7 @@ All configuration is via environment variables (or a `.env` file next to the pro
 | `STATE_FILE` | No | `/app/state/sync_state.json` | Base path where sync state is persisted. Additional accounts use `<name>.account-2.json`, `<name>.account-3.json`, etc. |
 | `EXIF_DRY_RUN` | No | `0` | If `1`, log intended writes and modify nothing. The sync-state file is also left unchanged, so a later real run will still process the assets. |
 | `EXIF_KEEP_BACKUPS` | No | `1` | If `1`, ExifTool saves `<file>_original` before editing. Set `0` only after you trust the tool. |
+| `LOG_TO_FILE` | No | `1` | If `1`, writes logs to `LOG_FILE` and the console. If `0`, logs to the console only; no log file or log directory is required. |
 
 † At least one of `IMMICH_API_KEYS` or `IMMICH_API_KEY` is required. If both are configured, `IMMICH_API_KEYS` takes precedence.
 
