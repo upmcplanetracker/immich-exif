@@ -66,13 +66,21 @@ def main():
         logger.info("=" * 60)
         logger.info("Immich EXIF Writer starting")
         logger.info("URL: %s", config.immich_url)
-        logger.info("Media path: %s", config.media_path)
+        if config.path_mappings:
+            logger.info(
+                "Path mappings: %s",
+                ", ".join(f"{src} -> {dst}" for src, dst in config.path_mappings),
+            )
+        else:
+            logger.info("Path mappings: none (using direct Immich paths)")
         logger.info("Sync interval: %ds", config.sync_interval)
         logger.info("Immich accounts configured: %d", len(api_keys))
         logger.info("Base state file: %s", config.state_file)
-        logger.info("Dry run: %s   Keep backups: %s",
-                    os.environ.get('EXIF_DRY_RUN', '0'),
-                    os.environ.get('EXIF_KEEP_BACKUPS', '1'))
+        logger.info(
+            "Dry run: %s   Keep backups: %s",
+            os.environ.get('EXIF_DRY_RUN', '0'),
+            os.environ.get('EXIF_KEEP_BACKUPS', '1'),
+        )
         logger.info("=" * 60)
 
         exif_writer = ExifWriter()
@@ -85,8 +93,11 @@ def main():
             cycle_errors = 0
 
             logger.info("-" * 60)
-            logger.info("Starting sync cycle #%d for %d account(s)",
-                        run_number, len(api_keys))
+            logger.info(
+                "Starting sync cycle #%d for %d account(s)",
+                run_number,
+                len(api_keys),
+            )
 
             # Each key is a separate user identity, not a failover credential.
             for account_number, api_key in enumerate(api_keys, start=1):
@@ -99,7 +110,10 @@ def main():
                 client = None
                 logger.info(
                     "Account %d/%d starting (state=%s, API key suffix=...%s)",
-                    account_number, len(api_keys), state_path, api_key[-4:],
+                    account_number,
+                    len(api_keys),
+                    state_path,
+                    api_key[-4:],
                 )
 
                 try:
@@ -107,7 +121,10 @@ def main():
                     client = ImmichApiClient(config.immich_url, [api_key])
                     state_manager = StateManager(state_file_path=state_path)
                     engine = SyncEngine(
-                        client, exif_writer, state_manager, config.media_path
+                        client,
+                        exif_writer,
+                        state_manager,
+                        path_mappings=config.path_mappings,
                     )
 
                     account_start = time.time()
@@ -122,21 +139,32 @@ def main():
                     try:
                         state_manager.save()
                     except Exception as exc:
-                        logger.error("State save failed for account %d: %s",
-                                     account_number, exc)
+                        logger.error(
+                            "State save failed for account %d: %s",
+                            account_number,
+                            exc,
+                        )
                         errors += 1
 
                     cycle_processed += processed
                     cycle_errors += errors
                     logger.info(
                         "Account %d/%d complete: %d processed, %d errors, %.1fs",
-                        account_number, len(api_keys), processed, errors, duration,
+                        account_number,
+                        len(api_keys),
+                        processed,
+                        errors,
+                        duration,
                     )
 
                 except Exception as exc:
                     cycle_errors += 1
-                    logger.error("Account %d/%d failed: %s",
-                                 account_number, len(api_keys), exc)
+                    logger.error(
+                        "Account %d/%d failed: %s",
+                        account_number,
+                        len(api_keys),
+                        exc,
+                    )
                     logger.error(traceback.format_exc())
                     # A failed account must not prevent the next account syncing.
                 finally:
@@ -144,20 +172,26 @@ def main():
                         try:
                             client.close()
                         except Exception:
-                            logger.exception("Could not close account %d client",
-                                             account_number)
+                            logger.exception(
+                                "Could not close account %d client",
+                                account_number,
+                            )
 
             logger.info(
                 "SYNC CYCLE #%d COMPLETE: %d processed, %d errors, %.1fs",
-                run_number, cycle_processed, cycle_errors,
+                run_number,
+                cycle_processed,
+                cycle_errors,
                 time.time() - cycle_start,
             )
 
             if stop_event.is_set():
                 break
             next_time = datetime.now() + timedelta(seconds=config.sync_interval)
-            logger.info("Next full account cycle at %s",
-                        next_time.strftime('%Y-%m-%d %H:%M:%S'))
+            logger.info(
+                "Next full account cycle at %s",
+                next_time.strftime('%Y-%m-%d %H:%M:%S'),
+            )
             stop_event.wait(config.sync_interval)
 
     except Exception as exc:
