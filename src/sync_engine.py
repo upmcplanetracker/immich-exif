@@ -1,5 +1,3 @@
-"""Fetch changed Immich assets and write their metadata to the media files."""
-
 import logging
 import os
 import threading
@@ -20,6 +18,7 @@ class ProcessResult(Enum):
     OK = "ok"
     SKIPPED = "skipped"
     READ_ONLY_VIDEO = "read_only_video"
+    SKIPPED_MISLABELED = "skipped_mislabeled"
     ERROR = "error"
 
 
@@ -96,6 +95,7 @@ class SyncEngine:
         processed = 0
         skipped_unchanged = 0
         skipped_read_only = 0
+        skipped_mislabeled = 0
         errors = 0
         checked = 0
         interrupted = False
@@ -123,6 +123,8 @@ class SyncEngine:
                 skipped_unchanged += 1
             elif result is ProcessResult.READ_ONLY_VIDEO:
                 skipped_read_only += 1
+            elif result is ProcessResult.SKIPPED_MISLABELED:
+                skipped_mislabeled += 1
             elif result is ProcessResult.ERROR:
                 errors += 1
 
@@ -144,6 +146,7 @@ class SyncEngine:
             "Processed successfully: %d\n"
             "Skipped (unchanged): %d\n"
             "Skipped (read-only video): %d\n"
+            "Skipped (mislabeled RIFF/WebP): %d\n"
             "Errors: %d\n"
             "Interrupted: %s\n"
             "Duration: %.1f seconds",
@@ -153,6 +156,7 @@ class SyncEngine:
             processed,
             skipped_unchanged,
             skipped_read_only,
+            skipped_mislabeled,
             errors,
             "Yes" if interrupted else "No",
             duration,
@@ -238,6 +242,19 @@ class SyncEngine:
             if not self.exif_writer.dry_run:
                 self.state_manager.set_asset_metadata(asset_id, metadata)
             return ProcessResult.READ_ONLY_VIDEO
+
+        # Non-.webp files with RIFF/WebP headers are rejected by ExifTool when
+        # written with image-format tags. Record state outside dry-run so we
+        # log once and do not retry unchanged files every cycle.
+        if self.exif_writer.is_mislabeled_webp(file_path):
+            logger.warning(
+                "Metadata write skipped (RIFF/WebP file mislabeled as %s): %s",
+                os.path.splitext(file_path)[1] or "<no ext>",
+                file_path,
+            )
+            if not self.exif_writer.dry_run:
+                self.state_manager.set_asset_metadata(asset_id, metadata)
+            return ProcessResult.SKIPPED_MISLABELED
 
         previous = self.state_manager.get_asset_metadata(asset_id)
         if not self.exif_writer.write_metadata(file_path, metadata, previous):
