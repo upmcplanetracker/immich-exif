@@ -52,15 +52,12 @@ Requirements
 
 *   A running Immich instance and one or more API keys from **User Settings → API Keys**
 *   The Immich upload directory and any External Library directories bind-mounted into the container (read/write)
-*   ExifTool ≥ 12.57 (tested through 13.55)
+*   ExifTool ≥ 12.57 (tested through 13.68)
 
 Quick start
 -----------
 
-### 1\. Create `.env`
-
-    cp .env.example .env
-    $EDITOR .env
+### 1\. Create `compose.yml`
 
 Minimum required:
 
