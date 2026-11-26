@@ -1,0 +1,31 @@
+# example compose file
+
+services:
+  immich-exif:
+    container_name: immich-exif
+    hostname: immich-exif
+    image: ghcr.io/upmcplanetracker/immich-exif:latest
+    restart: on-failure
+
+    user: "1000:1000"
+
+    environment:
+      TZ: America/New_York
+      SYNC_INTERVAL: "21600"
+      IMMICH_URL: http://immich-server:2283
+      IMMICH_API_KEYS: "secret api key here, consider using docker secrets"
+      EXIF_DRY_RUN: "1"
+      EXIF_KEEP_BACKUPS: "1"
+      LOG_FILE: /app/logs/exif-writer.log
+
+    volumes:
+      - ${HOME}/immich-exif/logs:/app/logs
+      - ${HOME}/Pictures:/usr/src/app/upload:rw
+      - /mnt/other-external-libs:/usr/src/app/external/other-external-libs:rw
+      - ${HOME}/immich-exif/state:/app/state:rw
+
+    security_opt:
+      - no-new-privileges:true
+
+    cap_drop:
+      - ALL
