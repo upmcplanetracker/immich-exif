@@ -17,6 +17,8 @@ services:
       EXIF_DRY_RUN: "1"
       EXIF_KEEP_BACKUPS: "1"
       LOG_FILE: /app/logs/exif-writer.log
+      LOG_LEVEL: "info"
+      STATE_FILE: /app/state/sync_state.json
 
     volumes:
       - ${HOME}/immich-exif/logs:/app/logs
