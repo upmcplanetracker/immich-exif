@@ -1,6 +1,8 @@
-This was forked from another repo https://github.com/jmathai/immich-exif and I vibe coded the crap out of it to squash bugs, add .envs, and add multiple api support.  Will put in more details later.
 immich-exif
 ===========
+AI Disclosure -
+This was forked from another repo that seems like it isn't being developed anymore and had some issues that I wanted to fix (https://github.com/jmathai/immich-exif) and I vibe coded the crap out of it to squash bugs, add .envs and multiple api support, change how it logs errors, etc. etc.
+
 
 Writes metadata from your [Immich](https://immich.app) library (albums, favorite status, description, GPS coordinates, capture date) into the EXIF / XMP / QuickTime tags of the underlying image and video files.
 
@@ -262,7 +264,7 @@ If using `docker compose stop`, the process should exit within a few seconds bec
 ExifTool version note
 ---------------------
 
-The provided `Dockerfile` builds ExifTool **13.55** from source (overriding Debian bookworm's 12.57) and verifies the installed version during the build. If you need a different version, change the `ARG EXIFTOOL_VERSION` line near the top of the `Dockerfile` and rebuild. To confirm the version in a built image:
+The provided `Dockerfile` builds ExifTool **13.64** from source (overriding Debian bookworm's 12.57) and verifies the installed version during the build. If you need a different version, change the `ARG EXIFTOOL_VERSION` line near the top of the `Dockerfile` and rebuild. To confirm the version in a built image:
 
     docker run --rm <your-image> exiftool -ver
 
