@@ -14,25 +14,41 @@ from .sync_engine import SyncEngine
 
 
 def setup_logging(config: Config) -> logging.Logger:
-    log_dir = os.path.dirname(config.log_file)
-    if log_dir:
-        os.makedirs(log_dir, exist_ok=True)
+    # File logging is optional. Defaults to enabled to preserve existing behavior.
+    log_to_file = os.environ.get("LOG_TO_FILE", "true").strip().lower() in {
+        "1", "true", "yes", "on"
+    }
 
     fmt = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     level = getattr(logging, config.log_level.upper())
-    file_handler = logging.FileHandler(config.log_file)
-    file_handler.setLevel(level)
-    file_handler.setFormatter(logging.Formatter(fmt))
+    formatter = logging.Formatter(fmt)
+
     console = logging.StreamHandler()
     console.setLevel(level)
-    console.setFormatter(logging.Formatter(fmt))
+    console.setFormatter(formatter)
 
     root = logging.getLogger()
     root.setLevel(level)
     for handler in list(root.handlers):
         root.removeHandler(handler)
-    root.addHandler(file_handler)
-    root.addHandler(console)
+
+    if log_to_file:
+        log_dir = os.path.dirname(config.log_file)
+        if log_dir:
+            os.makedirs(log_dir, exist_ok=True)
+
+        file_handler = logging.FileHandler(config.log_file)
+        file_handler.setLevel(level)
+        file_handler.setFormatter(formatter)
+        root.addHandler(file_handler)
+    else:
+        # Console-only logging: no file or log-directory is created.
+        root.addHandler(console)
+
+    # Also retain console output when file logging is enabled.
+    if log_to_file:
+        root.addHandler(console)
+
     return logging.getLogger(__name__)
 
 
