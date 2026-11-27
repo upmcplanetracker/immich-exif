@@ -152,7 +152,6 @@ Configuration — Core Variables
 
 All configuration is via environment variables or a `.env` file. Real environment variables always override `.env`. Startup fails fast with a clear `ValueError` if a required variable is missing, a key is still the placeholder `YOUR_API_KEY_HERE`, `PATH_MAPPINGS` contains a malformed entry, `SYNC_INTERVAL` is not a positive integer, or `LOG_LEVEL` is unknown.
 
-```markdown
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `IMMICH_URL` | **Yes** | — | Immich base URL, e.g. `http://immich-server:2283`. Must start with `http://` or `https://`. |
@@ -169,7 +168,6 @@ All configuration is via environment variables or a `.env` file. Real environmen
 | `ENCODE_FACES` | No | `0` | If `1`, writes face data (including boundary information) to the file. |
 
 † At least one of `IMMICH_API_KEYS` or `IMMICH_API_KEY` is required. If both are set, `IMMICH_API_KEYS` takes precedence.
-```
 
 Configuration — Database Variables New
 --------------------------------------
