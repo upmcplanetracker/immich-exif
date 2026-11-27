@@ -20,7 +20,7 @@ services:
       LOG_LEVEL: "info"
       STATE_FILE: /app/state/sync_state.json
       LOG_TO_FILE: "1"
-      ENCODE_FACES: "0"
+      ENCODE_FACES: "0"   # note -- feature not enabled yet
       
     volumes:
       - ${HOME}/immich-exif/logs:/app/logs
