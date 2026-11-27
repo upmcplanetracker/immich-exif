@@ -5,7 +5,7 @@ This was forked from another repo that seems like it isn't being developed anymo
 
 if the dev reappears I will abandon this project if they want and they can pick it up again. unlike me they seem to be a real programmer.  I am not. 
 
-Edit -- the dev has reappeared!  We are trying to figure out a way forward but he was fine with me forking and re-writing.  please support this and other projects of his.
+Edit -- the dev has reappeared!  We are trying to figure out a way forward but he was fine with me forking and re-writing.  [please support this and other projects of his](https://github.com/jmathai).
 
 I've run this lots of my setup but consider a backup before running this just in case. 
 
