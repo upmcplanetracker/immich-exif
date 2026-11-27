@@ -11,6 +11,10 @@ Writes metadata from your [Immich](https://immich.app) library (albums, favorite
 
 **Why this exists:** Immich stores metadata in its database, not in the files. When you add a photo to an album in Immich, the `.jpg` on disk is unchanged — so external tools (Lightroom, digiKam, PhotoPrism, plain `exiftool`) don't see your albums, ratings, or descriptions. This service bridges that gap by reading from the Immich API and writing to the files via ExifTool.
 
+### How Immich Handles In-Place Metadata Updates (File Hashes)
+
+Modifying embedded EXIF/IPTC/XMP tags updates the file's bytes and therefore changes its SHA-1 checksum in Immich. Because Immich tracks existing library and external-library assets by asset ID and file path rather than treating checksum changes as deletions, updating metadata in place does not cause assets to be lost or duplicated in your library—Immich uses the SHA-1 hash primarily for duplicate detection during initial upload/intake. (Note: if you later re-upload an already-modified file through a separate import flow, its updated hash will differ from the pre-edit original.)
+
 ## Data Sources
 
 ### Immich API
