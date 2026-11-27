@@ -184,55 +184,16 @@ Podman Quadlet — reuse immich-server's existing stanzas
     Environment=DB_HOSTNAME=immich-postgres
     # DB_PORT defaults to 5432 — only set if yours differs
 
-Variable
-
-Required
-
-Default
-
-Description
-
-`DB_USERNAME`
-
-No
-
-postgres
-
-Postgres username. Same value as `immich-server`'s `DB_USERNAME`.
-
-`DB_PASSWORD`
-
-Yes \*
-
-—
-
-Postgres password. Use the same `Secret=` stanza as `immich-server` so there is one source of truth. If absent, checksum patching is skipped with a warning.
-
-`DB_HOSTNAME`
-
-No
-
-immich-postgres
-
-Postgres host. Same value as `immich-server`'s `DB_HOSTNAME`. The container must be on the same Podman network as `immich-postgres`.
-
-`DB_DATABASE_NAME`
-
-No
-
-immich
-
-Postgres database name. Same value as `immich-server`'s `DB_DATABASE_NAME`.
-
-`DB_PORT`
-
-No
-
-5432
-
-Postgres port. `immich-server` does not set this explicitly (it relies on the libpq default); only add it if your setup uses a non-standard port.
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `DB_USERNAME` | No | `postgres` | Postgres username. Same value as `immich-server`'s `DB_USERNAME`. |
+| `DB_PASSWORD` | **Yes \*** | — | Postgres password. Use the same `Secret=` stanza as `immich-server` so there is one source of truth. If absent, checksum patching is skipped with a warning. |
+| `DB_HOSTNAME` | No | `immich-postgres` | Postgres host. Same value as `immich-server`'s `DB_HOSTNAME`. The container must be on the same Podman network as `immich-postgres`. |
+| `DB_DATABASE_NAME` | No | `immich` | Postgres database name. Same value as `immich-server`'s `DB_DATABASE_NAME`. |
+| `DB_PORT` | No | `5432` | Postgres port. `immich-server` does not set this explicitly (it relies on the libpq default); only add it if your setup uses a non-standard port. |
 
 \* Required only for automatic checksum patching. EXIF writes proceed regardless.
+
 
 **Network access.** The `immich-exif` container must be able to reach `immich-postgres` over the container network. In a Quadlet setup, add `Network=immich.network` (or whatever your shared network is named) to the `[Container]` section — the same network `immich-server` and `immich-postgres` share.
 
