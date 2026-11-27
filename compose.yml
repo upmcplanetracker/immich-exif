@@ -11,18 +11,18 @@ services:
 
     environment:
       TZ: America/New_York
-      SYNC_INTERVAL: "21600"
+      SYNC_INTERVAL: "21600"  # time in seconds
       IMMICH_URL: http://immich-server:2283
-      IMMICH_API_KEYS: "secret api key here, consider using docker secrets"
+      IMMICH_API_KEYS: "secret_api_here_consider_using_docker_secrets"
       EXIF_DRY_RUN: "1"
       EXIF_KEEP_BACKUPS: "1"
       LOG_FILE: /app/logs/exif-writer.log
-      LOG_LEVEL: "info"
+      LOG_LEVEL: "INFO"
       STATE_FILE: /app/state/sync_state.json
       LOG_TO_FILE: "1"
       ENCODE_FACES: "0"   # note -- feature not enabled yet
       DB_USERNAME: "postgres"
-      DB_PASSWORD: "consider using docker secrets"
+      DB_PASSWORD: "postgres_password_consider_using_docker_secrets"
       DB_HOSTNAME: "immich-postgres" # change as needed
       DB_DATABASE_NAME: "immich" # change as needed
       DB_PORT: "5432"
