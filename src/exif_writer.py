@@ -178,7 +178,13 @@ class ExifWriter:
 
     @staticmethod
     def _is_format_or_structure_rejection(stderr_text: Optional[str]) -> bool:
-        """Detect ExifTool errors caused by mislabeled formats or corrupt headers."""
+        """Detect ExifTool errors caused by mislabeled formats or corrupt headers.
+
+        Covers both hard format mismatches (wrong magic bytes, unknown type) and
+        structural corruption that ExifTool cannot repair: truncated IFD/directory
+        chains, unreadable image data blocks, etc.  Any match here causes the file
+        to be skipped rather than logged as an actionable ERROR.
+        """
         if not stderr_text:
             return False
         lower = stderr_text.lower()
@@ -188,8 +194,12 @@ class ExifWriter:
             'bad format ',
             'format error in file',
             'error reading file',
+            # ExifTool emits "Error reading image data" for corrupt TIFF/JPEG blobs
+            'error reading image data',
             'unknown file type',
             'corrupt ',
+            # Truncated IFD chains (e.g. "Truncated ExifIFD directory")
+            'truncated ',
         )
         return any(marker in lower for marker in markers)
 
@@ -210,7 +220,11 @@ class ExifWriter:
         self.last_write_skipped_format = False
 
         if not self.is_supported_file(file_path):
-            logger.warning("Unsupported file type: %s", file_path)
+            # Unsupported extension (e.g. .bmp) — not an error, just a skip.
+            # Set the flag so callers (sync_engine) can distinguish "skipped
+            # intentionally" from "tried and failed".
+            self.last_write_skipped_format = True
+            logger.debug("Unsupported file type, skipping: %s", file_path)
             return False
 
         if self.is_read_only_video(file_path):
