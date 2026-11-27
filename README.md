@@ -188,7 +188,7 @@ Podman Quadlet — reuse immich-server's existing stanzas
 |---|---|---|---|
 | `DB_USERNAME` | No | `postgres` | Postgres username. Same value as `immich-server`'s `DB_USERNAME`. |
 | `DB_PASSWORD` | **Yes \*** | — | Postgres password. Use the same `Secret=` stanza as `immich-server` so there is one source of truth. If absent, checksum patching is skipped with a warning. |
-| `DB_HOSTNAME` | No | `immich-postgres` | Postgres host. Same value as `immich-server`'s `DB_HOSTNAME`. The container must be on the same Podman network as `immich-postgres`. |
+| `DB_HOSTNAME` | No | `immich-postgres` | Postgres host. Same value as `immich-server`'s `DB_HOSTNAME`. The container must be on the same Docker network as `immich-postgres`. |
 | `DB_DATABASE_NAME` | No | `immich` | Postgres database name. Same value as `immich-server`'s `DB_DATABASE_NAME`. |
 | `DB_PORT` | No | `5432` | Postgres port. `immich-server` does not set this explicitly (it relies on the libpq default); only add it if your setup uses a non-standard port. |
 
@@ -279,7 +279,7 @@ Step 1 — hash all mismatched files and write UPDATE statements
                 skipped += 1; continue
     
             proc = subprocess.run(
-                ["podman", "exec", "immich-server", "sha1sum", container_path],
+                ["docker", "exec", "immich-server", "sha1sum", container_path],
                 capture_output=True, text=True,
             )
             if proc.returncode != 0 or not proc.stdout.strip():
@@ -302,7 +302,7 @@ Verification — spot check the output
 
 Step 2 — apply to Postgres
 
-    podman exec -i immich-postgres psql -U postgres -d immich -f - \
+    docker exec -i immich-postgres psql -U postgres -d immich -f - \
       < ~/large_checksums.sql > ~/large_psql.log 2>&1
 
 Step 3 — verify results
