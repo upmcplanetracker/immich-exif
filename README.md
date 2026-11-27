@@ -1,86 +1,106 @@
 immich-exif
 ===========
-AI Disclosure -
-This was forked from another repo that seems like it isn't being developed anymore and had some issues that I wanted to fix (https://github.com/jmathai/immich-exif) and I vibe coded the crap out of it to squash bugs, add .envs and multiple api support, change how it logs errors, etc. etc.
 
-if the dev reappears I will abandon this project if they want and they can pick it up again. unlike me they seem to be a real programmer.  I am not. 
+EXIF ↔ Immich metadata bridge
 
-Edit -- the dev has reappeared!  We are trying to figure out a way forward but he was fine with me forking and re-writing.  [please support this and other projects of his](https://github.com/jmathai).
+Overview [What & Why](#intro) [Data Sources](#data-sources) [Features](#features) [Requirements](#requirements) Setup [Quick Start](#quickstart) [Volume Setup](#volumes) [First Run](#first-run) Configuration [Core Variables](#config-core) [Database Variables](#config-db) [Multi-User Sync](#multi-user) Safety [Dry Run](#dry-run) [Backups](#backups) [Keyword Safety](#keyword-safety) [State & Errors](#state-errors) [Checksum Repair](#checksums) Reference [Verifying Writes](#verify) [Troubleshooting](#troubleshooting) [ExifTool Version](#exiftool-version) [Running Locally](#local-dev)
 
-I've run this lots of my setup but consider a backup before running this just in case. 
+immich-exif
+===========
 
-Writes metadata from your [Immich](https://immich.app) library (albums, favorite status, description, GPS coordinates, capture date) into the EXIF / XMP / QuickTime tags of the underlying image and video files.
+Writes metadata from your [Immich](https://immich.app) library — albums, favorites, descriptions, GPS coordinates, capture dates — directly into the EXIF / XMP / QuickTime tags of the underlying image and video files.  
+  
+Forked from [jmathai/immich-exif](https://github.com/jmathai/immich-exif) and substantially rewritten. The original dev has reappeared — please [support his work](https://github.com/jmathai).
 
-**Why this exists:** Immich stores metadata in its database, not in the files. When you add a photo to an album in Immich, the `.jpg` on disk is unchanged — so external tools (Lightroom, digiKam, PhotoPrism, plain `exiftool`) don't see your albums, ratings, or descriptions. This service bridges that gap by reading from the Immich API and writing to the files via ExifTool.
+**AI Disclosure.** I am not a real programmer. I vibe-coded the crap out of this to fix bugs, add multi-account support, rework logging, and add env-var configuration. I've run it extensively on my own setup, but **take a backup before you run this** — just in case.
 
-### How Immich Handles In-Place Metadata Updates (File Hashes)
+What & Why
+----------
 
-Modifying embedded EXIF/IPTC/XMP tags updates the file's bytes and therefore changes its SHA-1 checksum in Immich. Because Immich tracks existing library and external-library assets by asset ID and file path rather than treating checksum changes as deletions, updating metadata in place does not cause assets to be lost or duplicated in your library—Immich uses the SHA-1 hash primarily for duplicate detection during initial upload/intake. (Note: if you later re-upload an already-modified file through a separate import flow, its updated hash will differ from the pre-edit original.)
+Immich stores metadata — album memberships, ratings, descriptions, GPS — in its database, not in the files themselves. When you add a photo to an album in Immich, the `.jpg` on disk is unchanged, so external tools (Lightroom, digiKam, PhotoPrism, plain `exiftool`) see none of it. This service bridges that gap: it reads from the Immich API and writes to the files via ExifTool.
 
-## Data Sources
+**File hashes after a write.** Modifying embedded EXIF/IPTC/XMP tags changes the file's bytes and therefore its SHA-1 checksum. Immich tracks assets by asset ID and file path rather than checksum, so in-place metadata updates do _not_ cause assets to be lost or duplicated — Immich uses SHA-1 primarily for duplicate detection on initial upload. However, the stored checksum in the database becomes stale, and Immich will flag these under **Administration → Maintenance → Checksum mismatches**. See [Checksum Repair](#checksums) below for how this is handled automatically.
 
-### Immich API
-Used to retrieve metadata associated with assets, including:
+Data Sources
+------------
 
-- Album memberships
-- Favorites
-- Descriptions (including AI-generated descriptions)
-- GPS coordinates
-- Capture dates
+### Immich API — read only
 
-The Immich API is used for **reading metadata only**. This project does not modify assets through the Immich API.
+Used to retrieve asset metadata, including:
+
+*   Album memberships
+*   Favorites
+*   Descriptions (including AI-generated descriptions)
+*   GPS coordinates
+*   Capture dates
+
+This project does **not** modify assets through the Immich API.
 
 ### Filesystem (Upload & External Libraries)
-Provides direct access to the original media files on disk across both Immich-managed uploads and **External Libraries**.
 
-ExifTool is used to write metadata directly into the media files in place. This requires the container to have **read/write access** to every volume containing assets you want updated.
+Provides direct read/write access to the original media files on disk — both Immich-managed uploads and External Libraries. ExifTool writes metadata in place. The container must have **read/write access** to every volume containing assets you want updated.
 
-The API provides the metadata; the filesystem provides the actual files to modify.
+### Postgres Database New
+
+After each successful EXIF write, the new SHA-1 checksum is computed from the modified file and written directly to Immich's `assets` table via `psycopg` (Postgres v3 driver). This keeps Immich's database in sync without requiring a manual maintenance run. See [Database Variables](#config-db) and [Checksum Repair](#checksums).
 
 Features
 --------
 
-*   Incremental sync — only touches assets that changed in Immich
-*   **Multi-user / multi-account support** — runs an independent sync cycle with isolated state files for each configured API key
-*   **Native support for both Upload and External Libraries** — works out of the box when container mount paths mirror `immich-server`, or translates custom mount layouts via `PATH_MAPPINGS`
-*   Per-file diff — only writes tags that actually changed
-*   **Non-destructive keyword handling** — only removes keywords it wrote itself (verified against state); user-added keywords are never touched
-*   Correct GPS hemisphere handling (`abs` + explicit `N/S/E/W` ref)
-*   ISO 8601 → EXIF date conversion (refuses to write garbage)
-*   JPEG-in-HEIC detection — safely stages `.jpg` writes and atomically preserves the original filename when a JPEG file has a `.heic`/`.heif`/`.hif` extension
-*   Dry-run and backup modes for safe first runs
-*   Atomic state writes; corrupt state is quarantined, not silently discarded
-*   Graceful shutdown on SIGTERM/SIGINT (SIGKILL-proof via `tini`)
-*   One persistent ExifTool subprocess for the whole sync (fast)
+Incremental sync — only touches changed assets
+
+Multi-user / multi-account support with isolated state
+
+Upload and External Library support, zero config when paths match
+
+Per-file diff — only writes tags that actually changed
+
+Non-destructive keyword handling — never removes user-added keywords
+
+Correct GPS hemisphere handling (abs + explicit N/S/E/W ref)
+
+ISO 8601 → EXIF date conversion; refuses garbage dates
+
+JPEG-in-HEIC detection with atomic staged writes
+
+Dry-run and backup modes for safe first runs
+
+Atomic state writes; corrupt state quarantined, not discarded
+
+Graceful SIGTERM/SIGINT shutdown via tini
+
+Automatic checksum DB patch after each file write
 
 Requirements
 ------------
 
-*   A running Immich instance and one or more API keys from **User Settings → API Keys**.  Note: you probably just need `asset.read` and `album.read` permissions for the API key.  Open an issue if you find errors. If you are able to test out different permissions and find a different minimum need, please tell me.  TBH I haven't tested this.
-*   The Immich upload directory and any External Library directories bind-mounted into the container (read/write)
-*   ExifTool ≥ 12.57 (tested through 13.68)
+*   A running Immich instance with one or more API keys from **User Settings → API Keys**. You likely only need `asset.read` and `album.read` permissions — open an issue if you discover otherwise.
+*   The Immich upload directory and any External Library directories bind-mounted into the container with read/write access.
+*   ExifTool ≥ 12.57 (tested through 13.68 — the provided Dockerfile builds 13.64 from source).
+*   `psycopg[binary]` ≥ 3.1 — included in `requirements.txt`; required for automatic checksum repair.
 
-Quick start
+Quick Start
 -----------
 
-### 1\. Create `compose.yml`
+### 1\. Minimum .env
 
-Minimum required:
+Two variables are always required:
 
     IMMICH_URL=http://immich-server:2283
     IMMICH_API_KEYS=your-api-key-here
 
-By default, `immich-exif` resolves the `originalPath` reported by Immich directly on disk. Mounting your volumes at the **exact same container paths** used by `immich-server` (for example, `/usr/src/app/upload` and `/usr/src/app/external/...`) requires zero path configuration.
-
-If your `immich-exif` container mounts those directories at different paths, map them with `PATH_MAPPINGS`:
+By default, `immich-exif` resolves the `originalPath` reported by Immich directly on disk. Mounting volumes at the **exact same container paths** used by `immich-server` (e.g. `/usr/src/app/upload`) requires zero path configuration. If your paths differ, map them with `PATH_MAPPINGS`:
 
     PATH_MAPPINGS=/usr/src/app/upload=/data/upload,/usr/src/app/external/photos=/data/external/photos
 
-### 2\. Container volume setup
+Volume Setup
+------------
 
-#### Option A: Mirror `immich-server` paths (recommended — zero path config)
+### Option A — Mirror immich-server paths (recommended)
 
-**`docker-compose.yml` example:**
+Zero path configuration needed when container mount targets match `immich-server` exactly.
+
+docker-compose.yml
 
     services:
       immich-exif:
@@ -95,133 +115,335 @@ If your `immich-exif` container mounts those directories at different paths, map
           - ./state:/app/state
           - ./logs:/app/logs
 
-**Podman Quadlet (`.container`) example:**
+Podman Quadlet (.container)
 
     Volume=%h/Pictures:/usr/src/app/upload:rw
     Volume=/mnt/external_pictures:/usr/src/app/external/external_pictures:rw
     Volume=/mnt/external_videos:/usr/src/app/external/external_videos:rw
 
-*(Never mount multiple different host volumes to the same container target path; give each volume its own non-overlapping path.)*
+**Never** mount multiple different host volumes to the same container target path. Give each volume its own non-overlapping path.
 
-#### Option B: Custom container paths with `PATH_MAPPINGS`
-
-If your container mounts volumes under custom paths (e.g., `/mnt/upload` and `/mnt/external_photos`), set `PATH_MAPPINGS` in `.env` or your container environment:
+### Option B — Custom paths with PATH\_MAPPINGS
 
     PATH_MAPPINGS=/usr/src/app/upload=/mnt/upload,/usr/src/app/external/photos=/mnt/external_photos
 
-### 3\. Build and run — safely
+First Run
+---------
 
-Set `EXIF_DRY_RUN=1` in `.env` before the first start. Then run:
+Always start with `EXIF_DRY_RUN=1`:
+
+Docker
 
     docker compose build
     docker compose up -d
     docker compose logs -f immich-exif
 
-This is a continuously running service, so use `up -d` for the dry run rather
-than `docker compose run --rm`. Review the `[DRY RUN]` commands in the logs.
-No media files or persistent sync state are changed while dry-run mode is on.
+Review the `[DRY RUN]` entries in the logs. No media files, sync state, or database rows are changed in dry-run mode. When the log looks right:
 
-When the log looks right, change `EXIF_DRY_RUN=0` in `.env` and recreate the
-service:
-
+    # .env
+    EXIF_DRY_RUN=0
+    
     docker compose up -d --force-recreate
 
-The first real run may recheck the full library if the state file was created
-by an older version. Keep backups enabled for that run.
+**Keep backups on for the first real run.** The first run after a dry-run may recheck the full library if the state file was created by an older version.
 
-## Configuration
+Configuration — Core Variables
+------------------------------
 
-All configuration is via environment variables (or a `.env` file next to the process). Real environment variables always override `.env`.
+All configuration is via environment variables or a `.env` file. Real environment variables always override `.env`. Startup fails fast with a clear `ValueError` if a required variable is missing, a key is still the placeholder `YOUR_API_KEY_HERE`, `PATH_MAPPINGS` contains a malformed entry, `SYNC_INTERVAL` is not a positive integer, or `LOG_LEVEL` is unknown.
 
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `IMMICH_URL` | **Yes** | — | Immich base URL, e.g. `http://immich-server:2283`. Must start with `http://` or `https://`. |
-| `IMMICH_API_KEYS` | **Yes†** | — | Comma-separated list of Immich API keys (one per user account). Each key runs an independent sync cycle with its own state file. |
-| `IMMICH_API_KEY` | **Yes†** | — | Single API key fallback for installations using one Immich account. Used only if `IMMICH_API_KEYS` is not set. |
-| `PATH_MAPPINGS` | No | — | Optional comma- or newline-separated `immich_prefix=local_prefix` pairs to translate `immich-server` container paths to paths in this container (e.g. `/usr/src/app/upload=/data/upload`). Not needed if mount paths match `immich-server`. |
-| `SYNC_INTERVAL` | No | `900` | Seconds between sync cycles. `900` = 15 minutes. |
-| `LOG_LEVEL` | No | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL`. |
-| `LOG_FILE` | No | `/app/logs/exif-writer.log` | Log file path. Logs grow forever if enabled. Delete as needed. |
-| `STATE_FILE` | No | `/app/state/sync_state.json` | Base path where sync state is persisted. Additional accounts use `<name>.account-2.json`, `<name>.account-3.json`, etc. |
-| `EXIF_DRY_RUN` | No | `0` | If `1`, log intended writes and modify nothing. The sync-state file is also left unchanged, so a later real run will still process the assets. |
-| `EXIF_KEEP_BACKUPS` | No | `1` | If `1`, ExifTool saves `<file>_original` before editing so Immich doesn't see this as a new asset. Set `0` only after you trust the tool. |
-| `LOG_TO_FILE` | No | `1` | If `1`, writes logs to `LOG_FILE` and the console. If `0`, logs to the console only; no log file or log directory is required. |
-| `ENCODE_FACES` | No |`0` | If `1`, writes face data (including boundary information) to the file. |
+Variable
 
-† At least one of `IMMICH_API_KEYS` or `IMMICH_API_KEY` is required. If both are configured, `IMMICH_API_KEYS` takes precedence.
+Required
 
-Startup fails fast with a clear `ValueError` if any required variable is missing, if a key is still the placeholder `YOUR_API_KEY_HERE`, if `PATH_MAPPINGS` contains a malformed `src=dst` entry, if `SYNC_INTERVAL` isn't a positive integer, or if `LOG_LEVEL` isn't a known level.
+Default
 
-Multiple API keys (Multi-User Sync)
------------------------------------
+Description
+
+`IMMICH_URL`
+
+Yes
+
+—
+
+Immich base URL, e.g. `http://immich-server:2283`. Must start with `http://` or `https://`.
+
+`IMMICH_API_KEYS`
+
+Yes †
+
+—
+
+Comma-separated list of Immich API keys (one per user account). Each key runs an independent sync cycle with its own state file.
+
+`IMMICH_API_KEY`
+
+Yes †
+
+—
+
+Single API key fallback for one-account installations. Used only if `IMMICH_API_KEYS` is not set.
+
+`PATH_MAPPINGS`
+
+No
+
+—
+
+Comma- or newline-separated `immich_prefix=local_prefix` pairs. Not needed if mount paths match `immich-server`.
+
+`SYNC_INTERVAL`
+
+No
+
+900
+
+Seconds between sync cycles. `900` = 15 minutes.
+
+`LOG_LEVEL`
+
+No
+
+INFO
+
+`DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL`.
+
+`LOG_FILE`
+
+No
+
+/app/logs/exif-writer.log
+
+Log file path. Logs grow indefinitely — delete as needed.
+
+`LOG_TO_FILE`
+
+No
+
+1
+
+If `1`, writes logs to `LOG_FILE` and the console. If `0`, console only; no log directory required.
+
+`STATE_FILE`
+
+No
+
+/app/state/sync\_state.json
+
+Base path for sync state. Additional accounts write to `<name>.account-2.json`, `.account-3.json`, etc.
+
+`EXIF_DRY_RUN`
+
+No
+
+0
+
+If `1`, log all intended writes and modify nothing — files, state, and database are all left untouched.
+
+`EXIF_KEEP_BACKUPS`
+
+No
+
+1
+
+If `1`, ExifTool saves a `<file>_original` sibling before each edit. Set `0` only after you trust the tool.
+
+`ENCODE_FACES`
+
+No
+
+0
+
+If `1`, writes face data (including boundary information) to the file.
+
+† At least one of `IMMICH_API_KEYS` or `IMMICH_API_KEY` is required. If both are set, `IMMICH_API_KEYS` takes precedence.
+
+Configuration — Database Variables New
+--------------------------------------
+
+After writing EXIF data to a file, `immich-exif` recomputes the file's SHA-1 and patches the `assets.checksum` column in Immich's Postgres database directly. This prevents the checksum mismatch warnings that would otherwise appear in Administration → Maintenance.
+
+These variables mirror the ones already declared in `immich-server`'s own Quadlet unit or `docker-compose.yml` — no new secrets to manage. If `DB_PASSWORD` is absent, the checksum patch is skipped and a warning is logged per asset, but the EXIF write itself still succeeds.
+
+Podman Quadlet — reuse immich-server's existing stanzas
+
+    Environment=DB_USERNAME=postgres
+    Secret=immich-db-password,type=env,target=DB_PASSWORD
+    Environment=DB_DATABASE_NAME=immich
+    Environment=DB_HOSTNAME=immich-postgres
+    # DB_PORT defaults to 5432 — only set if yours differs
+
+Variable
+
+Required
+
+Default
+
+Description
+
+`DB_USERNAME`
+
+No
+
+postgres
+
+Postgres username. Same value as `immich-server`'s `DB_USERNAME`.
+
+`DB_PASSWORD`
+
+Yes \*
+
+—
+
+Postgres password. Use the same `Secret=` stanza as `immich-server` so there is one source of truth. If absent, checksum patching is skipped with a warning.
+
+`DB_HOSTNAME`
+
+No
+
+immich-postgres
+
+Postgres host. Same value as `immich-server`'s `DB_HOSTNAME`. The container must be on the same Podman network as `immich-postgres`.
+
+`DB_DATABASE_NAME`
+
+No
+
+immich
+
+Postgres database name. Same value as `immich-server`'s `DB_DATABASE_NAME`.
+
+`DB_PORT`
+
+No
+
+5432
+
+Postgres port. `immich-server` does not set this explicitly (it relies on the libpq default); only add it if your setup uses a non-standard port.
+
+\* Required only for automatic checksum patching. EXIF writes proceed regardless.
+
+**Network access.** The `immich-exif` container must be able to reach `immich-postgres` over the container network. In a Quadlet setup, add `Network=immich.network` (or whatever your shared network is named) to the `[Container]` section — the same network `immich-server` and `immich-postgres` share.
+
+Multi-User Sync
+---------------
 
 Provide one API key per Immich user account as a comma-separated list:
 
     IMMICH_API_KEYS=key_user1,key_user2
 
-Behavior:
+*   **Independent account sync** — each key is a distinct Immich user identity; a full incremental sync runs for each account in sequence every cycle.
+*   **Per-account state isolation** — Account 1 uses `STATE_FILE`; subsequent accounts write to `sync_state.account-2.json`, `.account-3.json`, etc.
+*   **Fault isolation** — if one account errors, it is logged and skipped; remaining accounts sync normally.
+*   **Transient retries** — 5xx and connection errors retry with exponential backoff and jitter.
 
-*   **Independent account sync:** Each API key represents a distinct Immich user identity. On every cycle, `immich-exif` runs a full incremental sync for each configured account in sequence so both user libraries and external libraries are updated.
-*   **Per-account state isolation:** Account 1 uses `STATE_FILE` (default `/app/state/sync_state.json`), while subsequent accounts automatically write to `sync_state.account-2.json`, `sync_state.account-3.json`, and so on.
-*   **Fault isolation:** If one account encounters an error, it is logged and skipped so remaining accounts still sync normally.
-*   **Transient retries:** `5xx` and connection errors retry with exponential backoff and jitter.
+Whitespace around keys is trimmed. Newlines are accepted as separators in addition to commas.
 
-Whitespace around keys is trimmed. Newlines in the env var are also accepted as separators, though single-line comma-separated values work best with `env_file:` parsers.
+Safety — Dry Run
+----------------
 
-Safety features
----------------
+Set `EXIF_DRY_RUN=1` and every intended ExifTool command is logged at `INFO` with a `[DRY RUN]` prefix. Media files are not modified, asset metadata is not committed to the sync cache, the sync timestamp is not advanced, the state file is not saved, and **no database rows are updated**. You can inspect the output, disable dry-run, and re-run without losing any work.
 
-### Dry run
+Safety — Backups
+----------------
 
-Set `EXIF_DRY_RUN=1` and every intended ExifTool command is logged at `INFO`
-with a `[DRY RUN]` prefix. Media files are not modified, asset metadata is not
-committed to the sync cache, the sync timestamp is not advanced, and the state
-file is not saved. You can inspect the dry-run output, turn dry-run off, and
-run again without losing the work that needs to be done.
+With the default `EXIF_KEEP_BACKUPS=1`, ExifTool saves a sibling `<original-name>_original` before each modification:
 
-### Backups
+    /photo/2023/IMG_1234.jpg           ← modified
+    /photo/2023/IMG_1234.jpg_original  ← byte-for-byte original
 
-With the default `EXIF_KEEP_BACKUPS=1`, ExifTool saves a sibling `<original-name>_original` file before each modification. Example:
-
-    /photo/2023/IMG_1234.jpg           <- modified
-    /photo/2023/IMG_1234.jpg_original  <- byte-for-byte original
-
-After you've confirmed a sync looks right, you can remove backups:
+After confirming things look right, remove backups with:
 
     find /path/to/immich/upload -name '*_original' -delete
 
-Or disable them for future runs with `EXIF_KEEP_BACKUPS=0` (not recommended until you trust the tool).
+Safety — Keyword Handling
+-------------------------
 
-### Keyword safety
+Keyword writes are surgical, not destructive:
 
-The old version of this tool removed **all** existing keywords before writing albums, destroying user-added keywords. This version is surgical:
-
-*   Reads current keywords from the file (via ExifTool `get_tags`)
-*   Removes only keywords that (a) are present on disk _and_ (b) we recorded writing on the previous run (from `STATE_FILE`)
+*   Reads current keywords from the file via ExifTool `get_tags`
+*   Removes only keywords that (a) are on disk _and_ (b) were recorded as written by us on the previous run (from `STATE_FILE`)
 *   Adds any new albums as keywords
-*   Keywords you added manually via Lightroom, digiKam, etc. are **never** removed
+*   Keywords added manually in Lightroom, digiKam, etc. are **never** removed
 
-### Read-only video containers
+Safety — State & Error Handling
+-------------------------------
 
-Matroska (`.mkv`), WebM (`.webm`), and AVI (`.avi`) files are skipped cleanly for tag writes and recorded in state as handled so they do not generate repeated warnings on subsequent incremental runs.
+*   The sync engine does not prune cached assets from an incremental search, since that search is not a complete inventory.
+*   The sync timestamp is not advanced when a run is interrupted or any asset fails — those assets are retried on the next cycle.
+*   If Immich returns an error reading any album, the album-map scan aborts the sync entirely rather than continuing with incomplete data.
+*   Corrupt state files are renamed to `sync_state.json.corrupt-<timestamp>` and logged at `ERROR`.
 
-### State schema & error handling
+Checksum Repair New
+-------------------
 
-The sync engine does not prune cached assets from an incremental search because
-that search is not a complete inventory of the library. It also does not
-advance the sync timestamp when a run is interrupted or any asset fails; those
-assets are retried on the next cycle.
+Every successful EXIF write changes the file's bytes. After the write, `update_immich_checksum()` in `exif_writer.py` computes the new SHA-1 in pure Python (1 MiB chunks, `hashlib.sha1`) and issues:
 
-If Immich returns an error while reading any album, the album-map scan aborts
-the sync instead of continuing with incomplete data. This prevents a temporary
-API failure from being mistaken for albums being removed.
+    UPDATE assets SET checksum = decode('<sha1hex>', 'hex') WHERE id = '<asset_id>'
 
-Corrupt state files (bad JSON) are renamed to `sync_state.json.corrupt-<timestamp>` and logged at `ERROR`, rather than silently triggering a mystery full resync.
+The connection is opened from the DB env vars above and closed immediately — or a shared `psycopg.Connection` can be passed from the sync engine to avoid reconnecting per asset. Dry-run mode logs the SQL that _would_ run and touches nothing.
 
-Verifying a file after a run
+**Bulk repair for existing mismatches.** If you have pre-existing checksum mismatches (from writes before this feature was added), export the mismatch CSV from **Administration → Maintenance → Checksum mismatches**, then run the repair script below to hash all affected files via `immich-server` and apply the `UPDATE` statements in one batch.
+
+### Generate and apply a bulk repair SQL file
+
+Step 1 — hash all mismatched files and write UPDATE statements
+
+    python3 - <<'EOF'
+    import csv, subprocess
+    from pathlib import Path
+    
+    src_path = Path.home() / "checksum_mismatch.csv"   # export from Immich UI
+    sql_path = Path.home() / "large_checksums.sql"
+    
+    statements, skipped, processed = [], 0, 0
+    
+    with src_path.open(newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            processed += 1
+            asset_id = (row.get("assetId") or "").strip()
+            container_path = (row.get("path") or "").strip()
+            if not asset_id or not container_path:
+                skipped += 1; continue
+    
+            proc = subprocess.run(
+                ["podman", "exec", "immich-server", "sha1sum", container_path],
+                capture_output=True, text=True,
+            )
+            if proc.returncode != 0 or not proc.stdout.strip():
+                skipped += 1; continue
+    
+            sha1_hex = proc.stdout.strip().split()[0]
+            statements.append(
+                f"UPDATE assets SET checksum = decode('{sha1_hex}', 'hex') WHERE id = '{asset_id}';"
+            )
+            if processed % 1000 == 0:
+                print(f"  {processed} rows processed, {len(statements)} SQL ready, {skipped} skipped")
+    
+    sql_path.write_text("\n".join(statements) + "\n", encoding="utf-8")
+    print(f"Done: {len(statements)} UPDATE statements → {sql_path} ({skipped} skipped)")
+    EOF
+
+Verification — spot check the output
+
+    head -n 5 ~/large_checksums.sql && wc -l ~/large_checksums.sql
+
+Step 2 — apply to Postgres
+
+    podman exec -i immich-postgres psql -U postgres -d immich -f - \
+      < ~/large_checksums.sql > ~/large_psql.log 2>&1
+
+Step 3 — verify results
+
+    grep -c "^UPDATE 1" ~/large_psql.log
+    grep -iE "error|conflict" ~/large_psql.log | head -n 20
+
+Then refresh **Administration → Maintenance → Checksum mismatches** in the Immich web UI to confirm the count drops to zero.
+
+Verifying a File After a Run
 ----------------------------
 
-For a photo:
+Photo
 
     exiftool -Keywords -Subject -Rating -Description \
              -GPSLatitude -GPSLatitudeRef \
@@ -229,12 +451,12 @@ For a photo:
              -DateTimeOriginal \
              /path/to/photo.jpg
 
-For a video:
+Video
 
     exiftool -Subject -Rating -Description -CreateDate \
              /path/to/video.mp4
 
-To see exactly what changed vs the backup:
+Diff against backup
 
     exiftool -diff photo.jpg photo.jpg_original
 
@@ -243,40 +465,44 @@ Troubleshooting
 
 ### Assets log "File missing"
 
-The `WARNING` log line shows both `originalPath` (the path inside `immich-server`) and `resolved` (the path checked inside `immich-exif`). Compare them to diagnose:
+The `WARNING` line shows both `originalPath` (inside `immich-server`) and `resolved` (inside `immich-exif`). Compare them:
 
-1.  **Missing volume mount** — Make sure every upload and external library volume mounted into `immich-server` is also mounted read/write into `immich-exif`.
-2.  **Mismatched container paths** — Either update your `immich-exif` volume mount target so it matches `originalPath` directly, or add a `PATH_MAPPINGS` rule translating the `immich-server` prefix to your `immich-exif` mount path.
-3.  **Colliding mounts** — Ensure you haven't mounted two host directories onto the same target directory in your compose or Quadlet file.
+1.  **Missing volume mount** — every upload and external library volume in `immich-server` must also be mounted read/write in `immich-exif`.
+2.  **Mismatched container paths** — update the mount target so it matches `originalPath`, or add a `PATH_MAPPINGS` rule.
+3.  **Colliding mounts** — two different host directories mounted to the same container path will shadow each other.
 
-### `401` / `403` authentication errors
+### 401 / 403 authentication errors
 
-Either an API key is wrong/expired, or it belongs to a user without access to those assets. Regenerate the user's API key in Immich (**User Settings → API Keys**) and update `IMMICH_API_KEYS`.
+The API key is wrong, expired, or belongs to a user without access to those assets. Regenerate the key in **User Settings → API Keys** and update `IMMICH_API_KEYS`.
 
 ### Videos not getting keywords
 
-Videos are tagged with `XMP:Subject`. Some players/DAM tools only read `QuickTime:Keywords` or `Keys:Keywords`. If your tool doesn't show video keywords, try `exiftool -XMP:Subject -a video.mp4` to confirm the tag is present; if it is, the issue is your tool's reader, not the writer.
+Videos are tagged with `XMP:Subject`. Some tools only read `QuickTime:Keywords`. Run `exiftool -XMP:Subject -a video.mp4` to confirm the tag is present — if it is, the issue is your tool's reader, not the writer.
 
 ### Photos suddenly have fewer keywords
 
-Check the diff against the backup. If keywords were removed, they must have matched our previous album list. If they were user-added but happen to match an album name you've since removed, they'd be removed — this is the inherent trade-off of surgical diffing vs. never removing anything. If you want "add only, never remove" behavior, that's a one-line change in `_keyword_params` (remove the `to_remove` block); say so and I'll patch it.
+Keywords were removed because they matched both the on-disk state and the previous album list in the state file. If a user-added keyword happens to match an album name you've since removed in Immich, it will be removed — that is the inherent trade-off of surgical diffing. For "add only, never remove" behaviour, remove the `to_remove` block from `_keyword_params` in `exif_writer.py`.
 
-### Logs show `[DRY RUN]` but you didn't set `EXIF_DRY_RUN`
+### Checksum mismatches still appear after a write
 
-Check that `EXIF_DRY_RUN=1` isn't set in your shell environment, your `docker-compose.yml` `environment:` block, your systemd Quadlet unit, or inherited from the parent process. `printenv | grep EXIF` shows what's in the current shell.
+Check that `DB_PASSWORD` is set and that the container can reach `immich-postgres` on the same network. Look for `update_immich_checksum` in the logs — a `WARNING` means the row wasn't found; an `ERROR` means the DB connection failed. For bulk pre-existing mismatches, use the repair script in the [Checksum Repair](#checksums) section.
+
+### Logs show \[DRY RUN\] but you didn't set EXIF\_DRY\_RUN
+
+Check your shell environment, `docker-compose.yml` `environment:` block, or Quadlet unit for a stale `EXIF_DRY_RUN=1`. Run `printenv | grep EXIF` to see what's in scope.
 
 ### Container takes a long time to shut down
 
-If using `docker compose stop`, the process should exit within a few seconds because `tini` + SIGTERM handler + `stop_event.wait()` (not `time.sleep()`) means in-flight work is finished and the process exits cleanly. If it takes longer than ~10 seconds, check that you built with the new `Dockerfile` (which has `tini`). Without tini, Python's SIGTERM handler is still called, but child processes (ExifTool) can be orphaned.
+With `tini` in the Dockerfile, SIGTERM should flush in-flight work and exit within a few seconds. If it takes longer than ~10 seconds, the image was probably built without `tini`. Without it, Python's SIGTERM handler still fires, but ExifTool child processes can be orphaned.
 
-ExifTool version note
+ExifTool Version Note
 ---------------------
 
-The provided `Dockerfile` builds ExifTool **13.64** from source (overriding Debian bookworm's 12.57) and verifies the installed version during the build. If you need a different version, change the `ARG EXIFTOOL_VERSION` line near the top of the `Dockerfile` and rebuild. To confirm the version in a built image:
+The provided `Dockerfile` builds ExifTool **13.64** from source, overriding Debian bookworm's 12.57, and verifies the installed version at build time. To use a different version, change the `ARG EXIFTOOL_VERSION` line near the top of the `Dockerfile` and rebuild. To confirm what's in a built image:
 
     docker run --rm <your-image> exiftool -ver
 
-Running locally (without Docker)
+Running Locally (Without Docker)
 --------------------------------
 
     python -m venv .venv && . .venv/bin/activate
