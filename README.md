@@ -5,6 +5,8 @@ This was forked from another repo that seems like it isn't being developed anymo
 
 if the dev reappears I will abandon this project if they want and they can pick it up again. unlike me they seem to be a real programmer.  I am not. 
 
+Edit -- the dev has reappeared!  We are trying to figure out a way forward but he was fine with me forking and re-writing.  please support this and other projects of his.
+
 I've run this lots of my setup but consider a backup before running this just in case. 
 
 Writes metadata from your [Immich](https://immich.app) library (albums, favorite status, description, GPS coordinates, capture date) into the EXIF / XMP / QuickTime tags of the underlying image and video files.
@@ -142,7 +144,7 @@ All configuration is via environment variables (or a `.env` file next to the pro
 | `LOG_FILE` | No | `/app/logs/exif-writer.log` | Log file path. Logs grow forever if enabled. Delete as needed. |
 | `STATE_FILE` | No | `/app/state/sync_state.json` | Base path where sync state is persisted. Additional accounts use `<name>.account-2.json`, `<name>.account-3.json`, etc. |
 | `EXIF_DRY_RUN` | No | `0` | If `1`, log intended writes and modify nothing. The sync-state file is also left unchanged, so a later real run will still process the assets. |
-| `EXIF_KEEP_BACKUPS` | No | `1` | If `1`, ExifTool saves `<file>_original` before editing. Set `0` only after you trust the tool. |
+| `EXIF_KEEP_BACKUPS` | No | `1` | If `1`, ExifTool saves `<file>_original` before editing so Immich doesn't see this as a new asset. Set `0` only after you trust the tool. |
 | `LOG_TO_FILE` | No | `1` | If `1`, writes logs to `LOG_FILE` and the console. If `0`, logs to the console only; no log file or log directory is required. |
 | `ENCODE_FACES` | No |`0` | If `1`, writes face data (including boundary information) to the file. |
 
