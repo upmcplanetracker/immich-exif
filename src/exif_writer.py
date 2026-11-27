@@ -12,6 +12,7 @@
 #   * Non-.webp files containing RIFF/WebP data are skipped with a warning.
 #   * Format mismatches or corrupt file headers rejected by ExifTool are
 #     reported as skipped-unwriteable so they do not stall sync progress.
+import hashlib
 import logging
 import os
 import shutil
@@ -273,6 +274,185 @@ class ExifWriter:
         return self._perform_write_passes(
             file_path, params, tag_dict, force_overwrite=not self._keep_backups
         )
+
+    # ----- Immich checksum repair -----
+
+    @staticmethod
+    def _build_pg_dsn() -> str:
+        """Build a libpq connection string from Immich's standard env vars.
+
+        Immich's own container environment exposes:
+            DB_USERNAME       (default: postgres)
+            DB_PASSWORD       (required)
+            DB_HOSTNAME       (default: immich-postgres)
+            DB_DATABASE_NAME  (default: immich)
+            DB_PORT           (default: 5432)
+
+        These are the same variables declared in the Quadlet unit's
+        ``Environment=`` / ``Secret=`` stanzas, so no extra configuration is
+        needed — just drop the exif container on the same Podman network.
+
+        Raises:
+            EnvironmentError: when DB_PASSWORD is absent or empty.
+        """
+        user     = os.environ.get('DB_USERNAME',      'postgres').strip()
+        password = os.environ.get('DB_PASSWORD',      '').strip()
+        host     = os.environ.get('DB_HOSTNAME',      'immich-postgres').strip()
+        dbname   = os.environ.get('DB_DATABASE_NAME', 'immich').strip()
+        port     = os.environ.get('DB_PORT',          '5432').strip()
+
+        if not password:
+            raise EnvironmentError(
+                "DB_PASSWORD is not set or empty.  "
+                "Add it to your Quadlet unit as a Secret= or Environment= "
+                "stanza (the same value used by immich-server)."
+            )
+
+        # psycopg (v3) accepts standard libpq DSN strings.
+        # Percent-encode special characters in the password so the URI
+        # parser does not misinterpret them.
+        from urllib.parse import quote as _urlquote
+        return (
+            f"postgresql://{_urlquote(user, safe='')}:{_urlquote(password, safe='')}"
+            f"@{host}:{port}/{_urlquote(dbname, safe='')}"
+        )
+
+    def update_immich_checksum(
+        self,
+        file_path: str,
+        asset_id: str,
+        db_conn=None,
+    ) -> bool:
+        """Recompute the SHA-1 of *file_path* and patch Immich's asset.checksum.
+
+        Writing EXIF data changes the file's bytes, which invalidates the
+        checksum stored in Immich's database and causes mismatch errors under
+        Administration → Maintenance → Checksum mismatches.  Call this
+        immediately after a successful :meth:`write_metadata` to keep the DB
+        in sync.
+
+        Args:
+            file_path:
+                Absolute path to the file that was just written.
+            asset_id:
+                Immich asset UUID — the ``id`` column in the ``assets`` table.
+            db_conn:
+                An open ``psycopg.Connection`` (v3).  When *None* a
+                short-lived connection is opened using credentials assembled
+                from the standard Immich env vars (``DB_USERNAME``,
+                ``DB_PASSWORD``, ``DB_HOSTNAME``, ``DB_DATABASE_NAME``,
+                ``DB_PORT``) and closed before returning.  Pass a shared
+                connection from the caller to avoid reconnecting on every
+                asset — the method manages its own cursor and commit.
+
+        Returns:
+            ``True``  — checksum column updated (or dry-run logged).
+            ``False`` — skipped or failed; details logged at WARNING / ERROR.
+
+        Environment variables (when *db_conn* is None):
+            ``DB_USERNAME``       Postgres user     (default: ``postgres``)
+            ``DB_PASSWORD``       Postgres password (required)
+            ``DB_HOSTNAME``       Postgres host     (default: ``immich-postgres``)
+            ``DB_DATABASE_NAME``  Database name     (default: ``immich``)
+            ``DB_PORT``           Postgres port     (default: ``5432``)
+        """
+        if not asset_id:
+            logger.warning(
+                "update_immich_checksum: asset_id is empty for %s — skipped",
+                file_path,
+            )
+            return False
+
+        # --- compute new SHA-1 from the modified file ---
+        try:
+            sha1 = hashlib.sha1(usedforsecurity=False)
+            with open(file_path, 'rb') as fh:
+                for chunk in iter(lambda: fh.read(1 << 20), b''):
+                    sha1.update(chunk)
+            sha1_hex = sha1.hexdigest()
+        except OSError as exc:
+            logger.error(
+                "update_immich_checksum: cannot read %s to compute hash: %s",
+                file_path, exc,
+            )
+            return False
+
+        if self._dry_run:
+            logger.info(
+                "[DRY RUN] Would UPDATE assets SET checksum = decode('%s', 'hex') "
+                "WHERE id = '%s'  (file: %s)",
+                sha1_hex, asset_id, file_path,
+            )
+            return True
+
+        # --- update the database ---
+        sql = "UPDATE assets SET checksum = decode(%s, 'hex') WHERE id = %s"
+        owned_conn = False
+        conn = db_conn
+        try:
+            if conn is None:
+                try:
+                    import psycopg  # type: ignore[import]
+                except ImportError:
+                    logger.error(
+                        "update_immich_checksum: psycopg (v3) is not installed; "
+                        "cannot update checksum for asset %s.  "
+                        "Install with: pip install 'psycopg[binary]'",
+                        asset_id,
+                    )
+                    return False
+
+                try:
+                    dsn = self._build_pg_dsn()
+                except EnvironmentError as exc:
+                    logger.error(
+                        "update_immich_checksum: %s — skipping checksum update "
+                        "for asset %s (file: %s)",
+                        exc, asset_id, file_path,
+                    )
+                    return False
+
+                conn = psycopg.connect(dsn)
+                owned_conn = True
+
+            with conn.cursor() as cur:
+                cur.execute(sql, (sha1_hex, asset_id))
+                rows = cur.rowcount
+
+            conn.commit()
+
+            if rows == 0:
+                logger.warning(
+                    "update_immich_checksum: UPDATE matched 0 rows — "
+                    "asset_id %s may not exist in the database (file: %s)",
+                    asset_id, file_path,
+                )
+                return False
+
+            logger.info(
+                "Immich checksum updated: asset=%s sha1=%s file=%s",
+                asset_id, sha1_hex, file_path,
+            )
+            return True
+
+        except Exception as exc:
+            logger.error(
+                "update_immich_checksum: DB update failed for asset %s "
+                "(file: %s): %s",
+                asset_id, file_path, exc,
+            )
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            return False
+
+        finally:
+            if owned_conn and conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 
     def _write_jpeg_with_extension_override(
         self,
