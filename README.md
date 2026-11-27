@@ -152,111 +152,24 @@ Configuration — Core Variables
 
 All configuration is via environment variables or a `.env` file. Real environment variables always override `.env`. Startup fails fast with a clear `ValueError` if a required variable is missing, a key is still the placeholder `YOUR_API_KEY_HERE`, `PATH_MAPPINGS` contains a malformed entry, `SYNC_INTERVAL` is not a positive integer, or `LOG_LEVEL` is unknown.
 
-Variable
-
-Required
-
-Default
-
-Description
-
-`IMMICH_URL`
-
-Yes
-
-—
-
-Immich base URL, e.g. `http://immich-server:2283`. Must start with `http://` or `https://`.
-
-`IMMICH_API_KEYS`
-
-Yes †
-
-—
-
-Comma-separated list of Immich API keys (one per user account). Each key runs an independent sync cycle with its own state file.
-
-`IMMICH_API_KEY`
-
-Yes †
-
-—
-
-Single API key fallback for one-account installations. Used only if `IMMICH_API_KEYS` is not set.
-
-`PATH_MAPPINGS`
-
-No
-
-—
-
-Comma- or newline-separated `immich_prefix=local_prefix` pairs. Not needed if mount paths match `immich-server`.
-
-`SYNC_INTERVAL`
-
-No
-
-900
-
-Seconds between sync cycles. `900` = 15 minutes.
-
-`LOG_LEVEL`
-
-No
-
-INFO
-
-`DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL`.
-
-`LOG_FILE`
-
-No
-
-/app/logs/exif-writer.log
-
-Log file path. Logs grow indefinitely — delete as needed.
-
-`LOG_TO_FILE`
-
-No
-
-1
-
-If `1`, writes logs to `LOG_FILE` and the console. If `0`, console only; no log directory required.
-
-`STATE_FILE`
-
-No
-
-/app/state/sync\_state.json
-
-Base path for sync state. Additional accounts write to `<name>.account-2.json`, `.account-3.json`, etc.
-
-`EXIF_DRY_RUN`
-
-No
-
-0
-
-If `1`, log all intended writes and modify nothing — files, state, and database are all left untouched.
-
-`EXIF_KEEP_BACKUPS`
-
-No
-
-1
-
-If `1`, ExifTool saves a `<file>_original` sibling before each edit. Set `0` only after you trust the tool.
-
-`ENCODE_FACES`
-
-No
-
-0
-
-If `1`, writes face data (including boundary information) to the file.
+```markdown
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `IMMICH_URL` | **Yes** | — | Immich base URL, e.g. `http://immich-server:2283`. Must start with `http://` or `https://`. |
+| `IMMICH_API_KEYS` | **Yes †** | — | Comma-separated list of Immich API keys (one per user account). Each key runs an independent sync cycle with its own state file. |
+| `IMMICH_API_KEY` | **Yes †** | — | Single API key fallback for one-account installations. Used only if `IMMICH_API_KEYS` is not set. |
+| `PATH_MAPPINGS` | No | — | Comma- or newline-separated `immich_prefix=local_prefix` pairs. Not needed if mount paths match `immich-server`. |
+| `SYNC_INTERVAL` | No | `900` | Seconds between sync cycles. `900` = 15 minutes. |
+| `LOG_LEVEL` | No | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL`. |
+| `LOG_FILE` | No | `/app/logs/exif-writer.log` | Log file path. Logs grow indefinitely — delete as needed. |
+| `LOG_TO_FILE` | No | `1` | If `1`, writes logs to `LOG_FILE` and the console. If `0`, console only; no log directory required. |
+| `STATE_FILE` | No | `/app/state/sync_state.json` | Base path for sync state. Additional accounts write to `<name>.account-2.json`, `.account-3.json`, etc. |
+| `EXIF_DRY_RUN` | No | `0` | If `1`, log all intended writes and modify nothing — files, state, and database are all left untouched. |
+| `EXIF_KEEP_BACKUPS` | No | `1` | If `1`, ExifTool saves a `<file>_original` sibling before each edit. Set `0` only after you trust the tool. |
+| `ENCODE_FACES` | No | `0` | If `1`, writes face data (including boundary information) to the file. |
 
 † At least one of `IMMICH_API_KEYS` or `IMMICH_API_KEY` is required. If both are set, `IMMICH_API_KEYS` takes precedence.
+```
 
 Configuration — Database Variables New
 --------------------------------------
