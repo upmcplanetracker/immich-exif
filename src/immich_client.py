@@ -232,6 +232,10 @@ class ImmichApiClient:
     def get_asset_by_id(self, asset_id: str) -> Dict[str, Any]:
         return self._make_request('GET', f'/api/assets/{asset_id}')
 
+    def get_current_user(self) -> Dict[str, Any]:
+        """Return the authenticated user's profile (name, email, id, …)."""
+        return self._make_request('GET', '/api/users/me')
+
     def get_all_albums(self) -> List[Dict[str, Any]]:
         """Return all albums. Raises on failure (never returns a silent [])."""
         response = self._make_request('GET', '/api/albums')
