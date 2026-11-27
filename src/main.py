@@ -123,17 +123,38 @@ def main():
                     config.state_file, account_number
                 )
                 client = None
-                logger.info(
-                    "Account %d/%d starting (state=%s, API key suffix=...%s)",
-                    account_number,
-                    len(api_keys),
-                    state_path,
-                    api_key[-4:],
-                )
 
                 try:
                     # Pass exactly one key to this account's client.
                     client = ImmichApiClient(config.immich_url, [api_key])
+
+                    # Resolve the Immich display name for this key once up front
+                    # so every subsequent log line identifies the account by name
+                    # rather than a positional index.
+                    try:
+                        user_info = client.get_current_user()
+                        account_name = (
+                            user_info.get('name')
+                            or user_info.get('email')
+                            or f'account-{account_number}'
+                        )
+                    except Exception as exc:
+                        account_name = f'account-{account_number}'
+                        logger.warning(
+                            "Could not resolve display name for account %d "
+                            "(key suffix ...%s): %s — falling back to '%s'",
+                            account_number, api_key[-4:], exc, account_name,
+                        )
+
+                    logger.info(
+                        "Account %d/%d [%s] starting (state=%s, API key suffix=...%s)",
+                        account_number,
+                        len(api_keys),
+                        account_name,
+                        state_path,
+                        api_key[-4:],
+                    )
+
                     state_manager = StateManager(state_file_path=state_path)
                     engine = SyncEngine(
                         client,
@@ -155,8 +176,9 @@ def main():
                         state_manager.save()
                     except Exception as exc:
                         logger.error(
-                            "State save failed for account %d: %s",
+                            "State save failed for account %d [%s]: %s",
                             account_number,
+                            account_name,
                             exc,
                         )
                         errors += 1
@@ -164,9 +186,10 @@ def main():
                     cycle_processed += processed
                     cycle_errors += errors
                     logger.info(
-                        "Account %d/%d complete: %d processed, %d errors, %.1fs",
+                        "Account %d/%d [%s] complete: %d processed, %d errors, %.1fs",
                         account_number,
                         len(api_keys),
+                        account_name,
                         processed,
                         errors,
                         duration,
