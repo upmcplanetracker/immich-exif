@@ -1,13 +1,6 @@
 immich-exif
 ===========
 
-EXIF ↔ Immich metadata bridge
-
-Overview [What & Why](#intro) [Data Sources](#data-sources) [Features](#features) [Requirements](#requirements) Setup [Quick Start](#quickstart) [Volume Setup](#volumes) [First Run](#first-run) Configuration [Core Variables](#config-core) [Database Variables](#config-db) [Multi-User Sync](#multi-user) Safety [Dry Run](#dry-run) [Backups](#backups) [Keyword Safety](#keyword-safety) [State & Errors](#state-errors) [Checksum Repair](#checksums) Reference [Verifying Writes](#verify) [Troubleshooting](#troubleshooting) [ExifTool Version](#exiftool-version) [Running Locally](#local-dev)
-
-immich-exif
-===========
-
 Writes metadata from your [Immich](https://immich.app) library — albums, favorites, descriptions, GPS coordinates, capture dates — directly into the EXIF / XMP / QuickTime tags of the underlying image and video files.  
   
 Forked from [jmathai/immich-exif](https://github.com/jmathai/immich-exif) and substantially rewritten. The original dev has reappeared — please [support his work](https://github.com/jmathai).
